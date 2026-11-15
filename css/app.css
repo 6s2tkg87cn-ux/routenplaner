@@ -150,6 +150,8 @@ a { color: inherit; }
 .select:focus { outline: 0; border-color: var(--ink); }
 .primary-btn.wide { width: 100%; }
 .primary-btn:disabled, .ghost-btn:disabled { opacity: .5; cursor: default; filter: none; }
+.poi-radius { margin-top: 10px; }
+.poi-radius .select { width: auto; }
 .tour-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .tour-list li { display: flex; align-items: center; gap: 6px; }
 .tour-item { flex: 1; min-width: 0; text-align: left; border: 0; background: var(--field); border-radius: var(--r); padding: 9px 12px; display: grid; }

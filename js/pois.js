@@ -81,7 +81,7 @@ function distToRoute(route, i, lat, lon) {
 }
 
 // Rechtecke um Streckenabschnitte von etwa 12 km: schnelle Flächenabfrage statt Suche entlang jeder Kurve
-function boxes(route) {
+function boxes(route, radius) {
   const n = Math.max(1, Math.min(10, Math.ceil(route.dist / 12000)));
   const out = [];
   for (let k = 0; k < n; k++) {
@@ -91,20 +91,21 @@ function boxes(route) {
       const p = pointAt(route, Math.min(d, d1));
       s = Math.min(s, p.lat); nn = Math.max(nn, p.lat); w = Math.min(w, p.lon); e = Math.max(e, p.lon);
     }
-    const padLat = 0.004, padLon = 0.004 / Math.cos(s * Math.PI / 180);
+    const padLat = radius / 111320 + 0.0005, padLon = padLat / Math.cos(s * Math.PI / 180);
     out.push(`(${(s - padLat).toFixed(4)},${(w - padLon).toFixed(4)},${(nn + padLat).toFixed(4)},${(e + padLon).toFixed(4)})`);
   }
   return out;
 }
 
-/** Sucht Stopps bis 300 m neben der Route. cats: Liste der gewünschten Kategorien. Ergebnisse werden je Route gemerkt. */
-export async function fetchPois(route, cats, signal) {
+/** Sucht Stopps bis "radius" Meter neben der Route. cats: Liste der gewünschten Kategorien. Ergebnisse werden je Route gemerkt. */
+export async function fetchPois(route, cats, signal, radius = 300) {
   if (!cats.length) return [];
   let store = cache.get(route);
-  if (!store) { store = {}; cache.set(route, store); }
-  const missing = cats.filter((c) => !store[c]);
+  // Bei größerem Umkreis als bisher geladen neu abfragen; kleinere Umkreise werden aus dem Vorhandenen gefiltert
+  if (!store || store.radius < radius) { store = { radius, cats: {} }; cache.set(route, store); }
+  const missing = cats.filter((c) => !store.cats[c]);
   if (missing.length) {
-    const bb = boxes(route);
+    const bb = boxes(route, store.radius);
     const parts = missing.flatMap((c) => POI_CATS[c].filters.flatMap((f) => bb.map((b) => 'nw' + f + b + ';')));
     const json = await overpass('[out:json][timeout:20];(' + parts.join('') + ');out center tags 1500;', signal);
     const found = Object.fromEntries(missing.map((c) => [c, []]));
@@ -114,20 +115,20 @@ export async function fetchPois(route, cats, signal) {
       const t = e.tags || {}, mine = categoriesOf(t).filter((c) => found[c]);
       if (lat == null || !mine.length) continue;
       const i = nearestIndex(route, lat, lon);
-      // höchstens 300 m neben der Strecke
-      if (distToRoute(route, i, lat, lon) > 300) continue;
+      const off = distToRoute(route, i, lat, lon);
+      if (off > store.radius) continue;
       for (const cat of mine) {
         const key = cat + (t.name || '') + lat.toFixed(3) + lon.toFixed(3);
         if (seen.has(key)) continue;
         seen.add(key);
         found[cat].push({ lat, lon, cat, name: t.name || KIND[t.tourism] || POI_CATS[cat].label, kind: KIND[t.tourism] || '',
-          hours: t.opening_hours || '', d: route.cum[i] });
+          hours: t.opening_hours || '', d: route.cum[i], off });
       }
     }
-    Object.assign(store, found);
+    Object.assign(store.cats, found);
   }
   // Gleicher Ort in zwei gewählten Kategorien: nur einmal anzeigen
   const shown = new Set();
-  return cats.flatMap((c) => store[c]).filter((q) => { const k = q.name + q.lat.toFixed(4) + q.lon.toFixed(4); if (shown.has(k)) return false; shown.add(k); return true; })
+  return cats.flatMap((c) => store.cats[c]).filter((q) => q.off <= radius).filter((q) => { const k = q.name + q.lat.toFixed(4) + q.lon.toFixed(4); if (shown.has(k)) return false; shown.add(k); return true; })
     .sort((a, b) => a.d - b.d);
 }

@@ -41,6 +41,7 @@ const state = {
   departTime: '',
   windOnMap: true,
   poiCats: [],
+  poiRadius: 300,
   folds: {},
   detourKm: '',
   chartH: { desktop: 110, mobile: 90 },
@@ -67,6 +68,7 @@ function load() {
     if (typeof s.departTime === 'string') state.departTime = s.departTime;
     if (typeof s.windOnMap === 'boolean') state.windOnMap = s.windOnMap;
     if (Array.isArray(s.poiCats)) state.poiCats = s.poiCats.filter((c) => POI_CATS[c]);
+    if (s.poiRadius >= 100 && s.poiRadius <= 5000) state.poiRadius = s.poiRadius;
     if (s.folds && typeof s.folds === 'object') state.folds = s.folds;
     if (s.detourKm) state.detourKm = s.detourKm;
     if (s.chartH && s.chartH.desktop > 0 && s.chartH.mobile > 0) state.chartH = s.chartH;
@@ -1278,16 +1280,16 @@ async function updatePois() {
   status.hidden = false;
   status.textContent = 'Stopps werden gesucht …';
   try {
-    const pois = await fetchPois(r, state.poiCats, ctrl.signal);
+    const pois = await fetchPois(r, state.poiCats, ctrl.signal, state.poiRadius);
     if (ctrl !== poiCtrl || r !== route) return;
-    status.textContent = pois.length ? `${pois.length} Stopps an der Strecke. Tippe auf ein Symbol in der Karte.` : 'Keine passenden Stopps im Umkreis von 300 m um die Strecke gefunden.';
+    status.textContent = pois.length ? `${pois.length} Stopps an der Strecke. Tippe auf ein Symbol in der Karte.` : `Keine passenden Stopps im Umkreis von ${state.poiRadius < 1000 ? state.poiRadius + ' m' : state.poiRadius / 1000 + ' km'} um die Strecke gefunden.`;
     for (const q of pois) {
       const elm = h('button', { type: 'button', class: 'poi poi-' + q.cat, title: q.name, text: POI_CATS[q.cat].icon });
       elm.addEventListener('click', (ev) => {
         ev.stopPropagation();
         openMenu(q.lat, q.lon, h('div', { class: 'map-menu' },
           h('strong', { text: q.name }),
-          h('span', { class: 'menu-note', text: `${q.kind || POI_CATS[q.cat].label}, bei km ${fmt(q.d / 1000, 1)}` }),
+          h('span', { class: 'menu-note', text: `${q.kind || POI_CATS[q.cat].label}, bei km ${fmt(q.d / 1000, 1)}, ${fmt(Math.round(q.off / 10) * 10)} m neben der Strecke` }),
           q.hours ? h('span', { class: 'menu-note', text: q.hours }) : null,
           h('button', { type: 'button', text: 'Als Wegpunkt einfügen', onclick: () => { closeMenu(); addVia(q.lat, q.lon); } })), 14);
       });
@@ -1511,6 +1513,8 @@ function init() {
   $('gpxFile').addEventListener('change', () => { const f = $('gpxFile').files[0]; $('gpxFile').value = ''; if (f) importGpx(f); });
   renderTours();
   renderPoiChips();
+  $('poiRadius').value = String(state.poiRadius);
+  $('poiRadius').addEventListener('change', () => { state.poiRadius = +$('poiRadius').value; save(); schedulePois(100); });
   // Standort gleich anzeigen, wenn der Zugriff schon früher erlaubt wurde
   if (navigator.permissions && navigator.permissions.query) {
     navigator.permissions.query({ name: 'geolocation' }).then((r) => { if (r.state === 'granted') startWatch(false); }).catch(() => {});
