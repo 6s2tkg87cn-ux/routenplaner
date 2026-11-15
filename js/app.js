@@ -6,6 +6,7 @@ import {
 import { createProfileChart } from './elevation.js';
 import { generateRoundTrips, generateDetours } from './roundtrip.js';
 import { POI_CATS, fetchPois, PoiError } from './pois.js';
+import { listOffline, planDownload, runDownload, removeDownload } from './offline.js';
 import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
@@ -23,6 +24,8 @@ const h = (tag, props = {}, ...kids) => {
 const fmt = (v, d = 0) => v.toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d });
 const uid = () => Math.random().toString(36).slice(2, 9);
 const isMobile = () => window.matchMedia('(max-width: 820px)').matches;
+const online = () => navigator.onLine !== false;
+const mb = (bytes) => (bytes < 10e6 ? fmt(bytes / 1e6, 1) : fmt(bytes / 1e6)) + ' MB';
 
 // ---------------------------------------------------------------- Zustand
 
@@ -146,6 +149,7 @@ function sliceFeature(r, from, to, props) {
 
 function setLayer(key) {
   if (!LAYERS[key]) key = 'standard';
+  if (!online() && key !== 'standard') return toast('Ohne Internet gibt es nur die Standardkarte.');
   state.layer = key;
   map.setStyle(LAYERS[key].style, { diff: false });
   for (const b of $('layerMenu').querySelectorAll('[data-key]')) b.setAttribute('aria-checked', b.dataset.key === key ? 'true' : 'false');
@@ -196,7 +200,7 @@ function circleFeature(n) {
 
 function initMap() {
   map = new maplibregl.Map({
-    container: 'map', style: LAYERS[state.layer] ? LAYERS[state.layer].style : LAYERS.standard.style,
+    container: 'map', style: online() && LAYERS[state.layer] ? LAYERS[state.layer].style : LAYERS.standard.style,
     center: [state.view.lon, state.view.lat], zoom: state.view.zoom,
     attributionControl: false, dragRotate: false, pitchWithRotate: false, maxPitch: 0,
   });
@@ -485,6 +489,7 @@ function attachAutocomplete(input, drop, index) {
     const q = input.value.trim();
     if (ctrl) ctrl.abort();
     if (q.length < 2) return show(baseItems());
+    if (!online()) return show([], 'Die Ortssuche braucht Internet.');
     const mm = q.match(/^(-?\d{1,2}[.,]\d+)\s*[,; ]\s*(-?\d{1,3}[.,]\d+)$/);
     if (mm) {
       const lat = parseFloat(mm[1].replace(',', '.')), lon = parseFloat(mm[2].replace(',', '.'));
@@ -686,6 +691,7 @@ async function calcRoute() {
   const distinct = pts.some((p) => Math.abs(p.lat - pts[0].lat) > 1e-5 || Math.abs(p.lon - pts[0].lon) > 1e-5);
   if (pts.length < 2 || !distinct) { route = null; $('busy').hidden = true; showRoute(); return; }
   if (state.loop) pts.push(pts[0]);
+  if (!online()) { $('busy').hidden = true; toast('Ohne Internet lässt sich keine Route berechnen. Offline-Touren findest du unter „Meine Touren“.', true); return; }
   routeCtrl = new AbortController();
   const ctrl = routeCtrl;
   $('busy').hidden = false;
@@ -857,6 +863,7 @@ function setRoundBusy(on, text) {
 
 async function runProposals(kind) {
   const start = state.waypoints[0], end = state.waypoints[state.waypoints.length - 1];
+  if (!online()) return toast('Vorschläge brauchen Internet.', true);
   if (start.lat == null) return toast('Wähle zuerst einen Startpunkt.');
   const km = kind === 'round' ? state.round.km : parseFloat($('detourKm').value);
   const minKm = PROFILES[state.profile].foot ? 2 : 5;
@@ -1058,6 +1065,7 @@ function scheduleWeather() {
 async function updateWeather() {
   if (wxCtrl) wxCtrl.abort();
   if (!route) { chart.setWind(null); renderWindMap(null); return renderWeather(null); }
+  if (!online()) { chart.setWind(null); renderWindMap(null); return renderWeather(null, 'Das Wetter braucht Internet.'); }
   wxCtrl = new AbortController();
   const ctrl = wxCtrl, r = route;
   if (!$('wxBody').dataset.filled) renderWeather(null, 'Wetter wird geladen …');
@@ -1181,7 +1189,7 @@ function snapshot() {
   };
 }
 
-function restore(plan, name) {
+function restore(plan, name, stored) {
   if (!plan || !Array.isArray(plan.waypoints) || plan.waypoints.length < 1) return toast('Diese Tour lässt sich nicht laden.', true);
   if (PROFILES[plan.profile]) { state.profile = plan.profile; state.options[plan.profile] = { ...DEFAULT_OPTIONS[plan.profile], ...plan.options }; }
   state.waypoints = plan.waypoints.map((w) => ({ id: uid(), lat: w.lat, lon: w.lon, label: w.label || fmt(w.lat, 5) + ', ' + fmt(w.lon, 5) }));
@@ -1193,7 +1201,17 @@ function restore(plan, name) {
   $('tourName').value = state.tourName;
   fitNext = true;
   renderProfile(); renderOptions(); renderMode(); renderLoop(); renderWaypoints(); renderNogos();
-  changed();
+  if (!stored) return changed();
+  // Offline-Tour: gespeicherte Strecke und Stopps zeigen, ohne neu zu rechnen
+  alt = 0;
+  clearCandidates();
+  if (routeCtrl) { routeCtrl.abort(); routeCtrl = null; }
+  clearTimeout(routeTimer);
+  $('busy').hidden = true;
+  save();
+  route = stored.route;
+  storedPois = { route, pois: stored.pois || [] };
+  showRoute();
 }
 
 function gpxFile(type = 'application/gpx+xml') {
@@ -1240,6 +1258,8 @@ function storeTours(list) { try { localStorage.setItem(TOURS_KEY, JSON.stringify
 function saveTour() {
   if (!route) return;
   const name = state.tourName.trim() || defaultTourName();
+  const old = loadTours().filter((t) => t.name === name);
+  old.forEach((t) => { if (offRecs.has(t.id)) removeDownload(t.id).then(refreshOffline).catch(() => {}); });
   const list = loadTours().filter((t) => t.name !== name);
   list.unshift({ id: uid(), name, date: Date.now(), dist: route.dist, ascent: route.ascent, plan: snapshot() });
   storeTours(list);
@@ -1247,18 +1267,105 @@ function saveTour() {
   toast('Tour gespeichert: ' + name);
 }
 
+// ---- Offline: Tour mit Karte und Stopps aufs Gerät laden
+let offRecs = new Map(), offJob = null, storedPois = null;
+
+async function refreshOffline() {
+  try { offRecs = new Map((await listOffline()).map((r) => [r.id, r])); } catch (e) { offRecs = new Map(); }
+  renderTours();
+}
+
+async function prepareOffline(t) {
+  if (!online()) return toast('Zum Herunterladen brauchst du Internet.', true);
+  if (!('caches' in window) || !('indexedDB' in window)) return toast('Dieser Browser kann keine Offline-Daten speichern.', true);
+  if (offJob) offJob.ctrl.abort();
+  const job = offJob = { id: t.id, stage: 'prep', ctrl: new AbortController() };
+  renderTours();
+  try {
+    const p = t.plan, pts = p.waypoints.map((w) => ({ lat: w.lat, lon: w.lon }));
+    if (p.loop) pts.push(pts[0]);
+    const r = await fetchRoute({ profile: p.profile, options: { ...DEFAULT_OPTIONS[p.profile], ...p.options }, points: pts, nogos: p.nogos || [], signal: job.ctrl.signal });
+    const dl = await planDownload(r, LAYERS.standard.style, job.ctrl.signal);
+    let pois = [], poiNote = state.poiCats.length ? '' : ' Stopps sind keine gewählt.';
+    if (state.poiCats.length) {
+      try { pois = await fetchPois(r, state.poiCats, job.ctrl.signal, state.poiRadius); poiNote = ` ${pois.length} Stopps.`; } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        poiNote = ' Die Stopps konnten gerade nicht geladen werden.';
+      }
+    }
+    if (offJob !== job) return;
+    Object.assign(job, { stage: 'confirm', dl, rec: { id: t.id, name: t.name, plan: p, route: r, pois },
+      text: `${fmt(dl.tiles.length)} Kartenteile, rund ${mb(dl.estBytes)}, Streifen ${dl.buffer >= 1000 ? dl.buffer / 1000 + ' km' : dl.buffer + ' m'} je Seite.${poiNote}` });
+    renderTours();
+  } catch (e) {
+    if (offJob === job) { offJob = null; renderTours(); }
+    if (e.name !== 'AbortError') toast(e instanceof RouteError ? e.message : (e.message || 'Die Offline-Daten konnten nicht vorbereitet werden.'), true);
+  }
+}
+
+async function startOffline() {
+  const job = offJob;
+  if (!job || job.stage !== 'confirm') return;
+  job.stage = 'loading'; job.text = 'Lädt …';
+  renderTours();
+  try {
+    const rec = await runDownload(job.rec, job.dl, (done, total) => {
+      if (offJob !== job) return;
+      const el = document.querySelector('.tour-off-text');
+      if (el) el.textContent = `Lädt … ${fmt(done)} von ${fmt(total)} Teilen`;
+    }, job.ctrl.signal);
+    if (offJob === job) offJob = null;
+    await refreshOffline();
+    toast(`„${rec.name}“ ist offline verfügbar (${mb(rec.bytes)}).`);
+  } catch (e) {
+    if (offJob === job) { offJob = null; renderTours(); }
+    if (e.name !== 'AbortError') toast(e.message || 'Der Download ist fehlgeschlagen.', true);
+  }
+}
+
+function openTour(t) {
+  const rec = offRecs.get(t.id);
+  if (!rec && !online()) return toast('Diese Tour ist nicht offline gespeichert.', true);
+  restore(t.plan, t.name, rec ? { route: rec.route, pois: rec.pois } : null);
+  if (isMobile()) setSheet('half');
+}
+
 function renderTours() {
   const list = loadTours(), ul = $('tourList');
   ul.replaceChildren();
   $('tourEmpty').hidden = list.length > 0;
+  const link = (text, fn, cls = 'link-btn') => h('button', { type: 'button', class: cls, text, onclick: fn });
   for (const t of list) {
+    const rec = offRecs.get(t.id), job = offJob && offJob.id === t.id ? offJob : null;
+    let off;
+    if (job && job.stage === 'prep') off = [h('span', { class: 'tour-off-text', text: 'Wird vorbereitet …' }), link('Abbrechen', () => { job.ctrl.abort(); offJob = null; renderTours(); })];
+    else if (job && job.stage === 'confirm') off = [h('span', { class: 'tour-off-text', text: job.text }), link('Herunterladen', startOffline, 'ghost-btn'), link('Abbrechen', () => { offJob = null; renderTours(); })];
+    else if (job) off = [h('span', { class: 'tour-off-text', text: job.text }), link('Abbrechen', () => { job.ctrl.abort(); offJob = null; renderTours(); })];
+    else if (rec) off = [h('span', { class: 'tour-off-text ok', text: `Offline verfügbar, ${mb(rec.bytes)}` }), link('Offline-Daten löschen', () => removeDownload(t.id).then(refreshOffline))];
+    else off = [link('Offline verfügbar machen', () => prepareOffline(t))];
     ul.append(h('li', {},
-      h('button', { type: 'button', class: 'tour-item', onclick: () => { restore(t.plan, t.name); if (isMobile()) setSheet('half'); } },
+      h('button', { type: 'button', class: 'tour-item', onclick: () => openTour(t) },
         h('span', { class: 'tour-name', text: t.name }),
         h('span', { class: 'tour-meta', text: `${fmt(t.dist / 1000)} km, ${fmt(t.ascent)} hm, ${PROFILES[t.plan.profile] ? PROFILES[t.plan.profile].label : ''}, ${new Date(t.date).toLocaleDateString('de-DE')}` })),
-      h('button', { class: 'icon-btn', type: 'button', title: 'Löschen', 'aria-label': t.name + ' löschen',
-        onclick: () => { storeTours(loadTours().filter((x) => x.id !== t.id)); renderTours(); } }, icon('x'))));
+      h('button', { class: 'icon-btn', type: 'button', title: 'Tour löschen', 'aria-label': t.name + ' löschen',
+        onclick: () => { storeTours(loadTours().filter((x) => x.id !== t.id)); if (rec) removeDownload(t.id).then(refreshOffline).catch(() => {}); renderTours(); } }, icon('x')),
+      h('div', { class: 'tour-off' }, ...off)));
   }
+  let total = 0;
+  for (const r of offRecs.values()) total += r.bytes || 0;
+  const clear = $('btnOffClear');
+  clear.hidden = offRecs.size === 0;
+  clear.textContent = `Alle Offline-Daten löschen (${mb(total)})`;
+}
+
+// Hinweis und Kartenwechsel, wenn das Netz weg ist oder wiederkommt
+function applyOnline() {
+  $('offlineBadge').hidden = online();
+  document.body.classList.toggle('is-offline', !online());
+  if (!map) return;
+  if (!online() && state.layer !== 'standard') map.setStyle(LAYERS.standard.style, { diff: false });
+  else if (online() && state.layer !== 'standard') map.setStyle(LAYERS[state.layer].style, { diff: false });
+  if (online() && route) { scheduleWeather(); }
 }
 
 async function importGpx(file) {
@@ -1295,22 +1402,8 @@ function schedulePois(delay = 300) {
   poiTimer = setTimeout(updatePois, delay);
 }
 
-async function updatePois() {
-  if (poiCtrl) poiCtrl.abort();
-  poiMarkers.forEach((m) => m.remove());
-  poiMarkers = [];
-  const status = $('poiStatus');
-  status.hidden = true;
-  if (!route || !state.poiCats.length) return;
-  poiCtrl = new AbortController();
-  const ctrl = poiCtrl, r = route;
-  status.hidden = false;
-  status.textContent = 'Stopps werden gesucht …';
-  try {
-    const pois = await fetchPois(r, state.poiCats, ctrl.signal, state.poiRadius);
-    if (ctrl !== poiCtrl || r !== route) return;
-    status.textContent = pois.length ? `${pois.length} Stopps an der Strecke. Tippe auf ein Symbol in der Karte.` : `Keine passenden Stopps im Umkreis von ${state.poiRadius < 1000 ? state.poiRadius + ' m' : state.poiRadius / 1000 + ' km'} um die Strecke gefunden.`;
-    for (const q of pois) {
+function drawPois(pois) {
+  for (const q of pois) {
       const elm = h('button', { type: 'button', class: 'poi poi-' + q.cat + (q.unsure ? ' poi-unsure' : ''), title: q.name, text: POI_CATS[q.cat].icon });
       elm.addEventListener('click', (ev) => {
         ev.stopPropagation();
@@ -1321,7 +1414,32 @@ async function updatePois() {
           h('button', { type: 'button', text: 'Als Wegpunkt einfügen', onclick: () => { closeMenu(); addVia(q.lat, q.lon); } })), 14);
       });
       poiMarkers.push(new maplibregl.Marker({ element: elm }).setLngLat([q.lon, q.lat]).addTo(map));
-    }
+  }
+}
+
+async function updatePois() {
+  if (poiCtrl) poiCtrl.abort();
+  poiMarkers.forEach((m) => m.remove());
+  poiMarkers = [];
+  const status = $('poiStatus');
+  status.hidden = true;
+  // Offline-Tour: die mit der Tour gespeicherten Stopps zeigen
+  if (route && storedPois && storedPois.route === route && (!online() || !state.poiCats.length)) {
+    status.hidden = false;
+    status.textContent = storedPois.pois.length ? `${storedPois.pois.length} gespeicherte Stopps. Tippe auf ein Symbol in der Karte.` : 'Mit dieser Tour wurden keine Stopps gespeichert.';
+    return drawPois(storedPois.pois);
+  }
+  if (!route || !state.poiCats.length) return;
+  if (!online()) { status.hidden = false; status.textContent = 'Neue Stopps brauchen Internet.'; return; }
+  poiCtrl = new AbortController();
+  const ctrl = poiCtrl, r = route;
+  status.hidden = false;
+  status.textContent = 'Stopps werden gesucht …';
+  try {
+    const pois = await fetchPois(r, state.poiCats, ctrl.signal, state.poiRadius);
+    if (ctrl !== poiCtrl || r !== route) return;
+    status.textContent = pois.length ? `${pois.length} Stopps an der Strecke. Tippe auf ein Symbol in der Karte.` : `Keine passenden Stopps im Umkreis von ${state.poiRadius < 1000 ? state.poiRadius + ' m' : state.poiRadius / 1000 + ' km'} um die Strecke gefunden.`;
+    drawPois(pois);
   } catch (e) {
     if (e.name === 'AbortError') return;
     status.textContent = (e instanceof PoiError ? e.message : 'Die Stopps konnten nicht geladen werden.') + ' ';
@@ -1539,6 +1657,11 @@ function init() {
   $('btnImport').addEventListener('click', () => $('gpxFile').click());
   $('gpxFile').addEventListener('change', () => { const f = $('gpxFile').files[0]; $('gpxFile').value = ''; if (f) importGpx(f); });
   renderTours();
+  refreshOffline();
+  $('btnOffClear').addEventListener('click', async () => { for (const id of [...offRecs.keys()]) await removeDownload(id).catch(() => {}); refreshOffline(); toast('Alle Offline-Daten gelöscht.'); });
+  window.addEventListener('online', applyOnline);
+  window.addEventListener('offline', applyOnline);
+  applyOnline();
   renderPoiChips();
   $('poiRadius').value = String(state.poiRadius);
   $('poiRadius').addEventListener('change', () => { state.poiRadius = +$('poiRadius').value; save(); schedulePois(100); });
@@ -1548,8 +1671,9 @@ function init() {
   }
   document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { toggleLayerMenu(false); closeMenu(); } });
 
-  if (state.waypoints.filter((w) => w.lat != null).length >= 2) calcRoute();
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (state.waypoints.filter((w) => w.lat != null).length >= 2 && online()) calcRoute();
+  else if (!online()) toast('Kein Internet. Offline-Touren findest du unter „Meine Touren“.');
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
 init();

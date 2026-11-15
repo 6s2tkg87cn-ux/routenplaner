@@ -16,6 +16,7 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 - Hin und zurück sowie automatische Rundtouren nach Wunschlänge, Richtung und Höhenmeter-Vorliebe
 - Umweg von A nach B auf Wunschlänge, Stopps an der Strecke (Trinkwasser, Café, Einkehr, Supermarkt, Radladen)
 - Touren speichern, GPX-Import
+- Offline-Modus: gespeicherte Tour mit Standardkarte (Streifen um die Route) und Stopps aufs Gerät laden, unterwegs mit Standort ansehen
 - Wetter und Wind entlang der Strecke zur gewählten Abfahrtszeit, Empfehlung für Startzeit und Fahrtrichtung, Rundtouren mit Rückenwind auf dem Heimweg
 
 ## Dienste und Daten
