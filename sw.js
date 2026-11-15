@@ -1,7 +1,7 @@
 // Service Worker: hält die App-Dateien vor, damit sie schnell startet und sich installieren lässt.
 // Karten, Routing, Suche und Wetter kommen immer live aus dem Netz.
-const CACHE = 'rueckenwind-v2';
-const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/routing.js', 'js/elevation.js', 'js/roundtrip.js',
+const CACHE = 'rueckenwind-v3';
+const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/routing.js', 'js/elevation.js', 'js/roundtrip.js', 'js/weather.js',
   'vendor/maplibre/maplibre-gl.js', 'vendor/maplibre/maplibre-gl.css',
   'profiles/rennrad.brf', 'profiles/gravel.brf', 'profiles/alltag.brf',
   'vendor/fonts/barlow-latin-400-normal.woff2', 'vendor/fonts/barlow-latin-500-normal.woff2', 'vendor/fonts/barlow-latin-600-normal.woff2',

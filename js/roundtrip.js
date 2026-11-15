@@ -1,6 +1,7 @@
 // Automatische Rundtour: legt Wegpunkte auf einen Kreis durch den Start, routet hindurch
 // und passt die Größe an, bis die Wunschlänge erreicht ist.
 import { fetchRoute, RouteError, pointAt, haversine } from './routing.js';
+import { lateHeadwind } from './weather.js';
 
 const R = 6371008.8, RAD = Math.PI / 180;
 
@@ -97,7 +98,7 @@ async function buildCandidate({ start, target, bearing, clockwise, profile, opti
  * Erzeugt Vorschläge für eine Rundtour.
  * direction: Grad (0 = Norden) oder null für beliebig. climb: 'flat' | 'any' | 'hilly'.
  */
-export async function generateRoundTrips({ start, km, direction, climb, profile, options, nogos, signal, onProgress }) {
+export async function generateRoundTrips({ start, km, direction, climb, profile, options, nogos, signal, onProgress, wind }) {
   const target = km * 1000;
   const base = direction == null ? Math.random() * 360 : direction + (Math.random() * 16 - 8);
   const bearings = direction == null ? [0, 90, 180, 270].map((d) => base + d) : [-50, -17, 17, 50].map((d) => base + d);
@@ -122,5 +123,25 @@ export async function generateRoundTrips({ start, km, direction, climb, profile,
     c.name = 'Richtung ' + compassName(c.bearing);
   });
   cands.sort((a, b) => b.score - a.score);
-  return cands.slice(0, 3);
+  const top = cands.slice(0, 3);
+
+  // Wind: Runde so herum fahren, dass der Gegenwind am Anfang liegt und der Heimweg Rückenwind hat
+  if (wind && wind.speed >= 8) {
+    await Promise.all(top.map(async (c) => {
+      const fwd = lateHeadwind(c.route, wind.from, wind.speed), rev = lateHeadwind(c.route, wind.from, wind.speed, true);
+      let late = fwd;
+      if (rev < fwd - 2) {
+        try {
+          const vias = [...c.vias].reverse();
+          const r = await fetchRoute({ profile, options, nogos, signal, points: [start, ...vias, start] });
+          if (Math.abs(r.dist / target - 1) < Math.abs(c.route.dist / target - 1) + 0.06) {
+            c.route = r; c.vias = vias; c.clockwise = !c.clockwise;
+            late = lateHeadwind(r, wind.from, wind.speed);
+          }
+        } catch (e) { if (e.name === 'AbortError') throw e; }
+      }
+      c.windNote = late < -2 ? 'Rückenwind auf dem Heimweg' : late > 2 ? 'Gegenwind auf dem Heimweg' : '';
+    }));
+  }
+  return top;
 }

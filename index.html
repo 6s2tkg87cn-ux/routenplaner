@@ -61,6 +61,10 @@
           <span class="field-label" id="climbLabel">Höhenmeter</span>
           <div class="seg seg-small" id="climbSeg" role="radiogroup" aria-labelledby="climbLabel"></div>
         </div>
+        <div class="opt opt-toggle loop-row">
+          <label for="roundWind"><span class="opt-label">Wind berücksichtigen</span><span class="opt-note">Gegenwind zuerst, Rückenwind auf dem Heimweg. Gilt für die Abfahrtszeit unten.</span></label>
+          <input type="checkbox" id="roundWind" class="switch">
+        </div>
         <button id="btnRound" class="primary-btn wide" type="button">Rundtour vorschlagen</button>
         <p class="hint" id="roundStatus" hidden></p>
         <p class="hint">Radtyp und Optionen unten gelten auch für die Rundtour, zum Beispiel viel Wald oder kaum Autoverkehr.</p>
@@ -69,6 +73,15 @@
           <ul id="candList" class="cand-list"></ul>
           <button id="btnEditWp" class="link-btn" type="button">Wegpunkte dieser Runde bearbeiten</button>
         </div>
+      </section>
+
+      <section class="block" id="wxBlock" aria-label="Abfahrt und Wetter">
+        <h2>Abfahrt und Wetter</h2>
+        <div class="wx-when">
+          <select id="wxDay" class="select" aria-label="Tag der Abfahrt"></select>
+          <input id="wxTime" class="text-input" type="time" step="900" aria-label="Uhrzeit der Abfahrt">
+        </div>
+        <div id="wxBody" class="wx-body"></div>
       </section>
 
       <details class="block fold" id="optFold" open>
@@ -106,6 +119,7 @@
         Routing: <a href="https://brouter.de" target="_blank" rel="noopener">BRouter</a>.
         Karten und Daten: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>-Mitwirkende.
         Suche: <a href="https://photon.komoot.io" target="_blank" rel="noopener">Photon</a>.
+        Wetter: <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a>.
       </footer>
     </div>
   </aside>
@@ -151,6 +165,9 @@
     <span class="lg-title lg-gap">Untergrund</span>
     <span><i class="sw surf-asphalt"></i>Asphalt</span><span><i class="sw surf-schotter"></i>Schotter</span>
     <span><i class="sw surf-natur"></i>Naturboden</span><span><i class="sw surf-pflaster"></i>Pflaster</span>
+    <span class="lg-title lg-gap lg-wind" hidden>Wind</span>
+    <span class="lg-wind" hidden><i class="sw wind-head"></i>Gegenwind</span><span class="lg-wind" hidden><i class="sw wind-side"></i>Seitenwind</span>
+    <span class="lg-wind" hidden><i class="sw wind-tail"></i>Rückenwind</span>
   </div>
 </section>
 

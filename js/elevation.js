@@ -34,7 +34,7 @@ export function createProfileChart(host, { onHover }) {
   tip.hidden = true;
   host.append(svg, tip);
 
-  let route = null, geom = null;
+  let route = null, geom = null, wind = null;
 
   function draw() {
     svg.replaceChildren();
@@ -42,7 +42,7 @@ export function createProfileChart(host, { onHover }) {
     const W = host.clientWidth, H = host.clientHeight;
     if (!route || W < 80 || H < 60) return;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    const m = { l: 40, r: 10, t: 8, b: 30 };
+    const m = { l: 40, r: 10, t: 8, b: wind ? 38 : 30 };
     const pw = W - m.l - m.r, ph = H - m.t - m.b;
 
     // Wertebereich: mindestens 80 m, damit flache Touren nicht alpin aussehen
@@ -106,6 +106,17 @@ export function createProfileChart(host, { onHover }) {
     }
     svg.append(band);
 
+    // Wind als zweites Band: Gegenwind, Seitenwind, Rückenwind
+    if (wind) {
+      const wb = el('g', {});
+      for (const b of wind) {
+        const w = x(b.to) - x(b.from);
+        if (w < 0.4) continue;
+        wb.append(el('rect', { x: x(b.from).toFixed(1), y: base + 11, width: w.toFixed(1), height: 5, class: 'wind wind-' + b.cls }));
+      }
+      svg.append(wb);
+    }
+
     // Fadenkreuz
     const cross = el('g', { class: 'chart-cross', visibility: 'hidden' });
     const cl = el('line', { y1: m.t, y2: base });
@@ -129,7 +140,7 @@ export function createProfileChart(host, { onHover }) {
     const s = sectionAt(route, d);
     tip.innerHTML = `<strong>${fmt(d / 1000, 1)} km</strong><span>${fmt(p.ele)} m Höhe</span>` +
       `<span>${slope >= 0 ? 'Steigung' : 'Gefälle'} ${fmt(Math.abs(slope), 1)} %</span>` +
-      (s ? `<span>${SURFACE_LABEL[s.surface]}, ${WAY_LABEL[s.way]}</span>` : '');
+      (s ? `<span>${SURFACE_LABEL[s.surface]}, ${WAY_LABEL[s.way]}</span>` : '') + windLine(d);
     tip.hidden = false;
     const tw = tip.offsetWidth;
     let left = px + 12;
@@ -137,6 +148,14 @@ export function createProfileChart(host, { onHover }) {
     tip.style.left = Math.max(4, left) + 'px';
     tip.style.top = geom.m.t + 'px';
     if (fromChart) onHover(d, p);
+  }
+
+  function windLine(d) {
+    if (!wind) return '';
+    const b = wind.find((k) => d >= k.from && d <= k.to);
+    if (!b) return '';
+    const name = b.cls === 'head' ? 'Gegenwind' : b.cls === 'tail' ? 'Rückenwind' : b.wind < 6 ? 'Kaum Wind' : 'Seitenwind';
+    return `<span>${name}, ${fmt(b.wind)} km/h</span>`;
   }
 
   function fromEvent(ev) {
@@ -154,5 +173,6 @@ export function createProfileChart(host, { onHover }) {
   return {
     setRoute(r) { route = r; tip.hidden = true; draw(); },
     setCursor(d) { showAt(d, false); },
+    setWind(bins) { wind = bins && bins.length ? bins : null; draw(); },
   };
 }

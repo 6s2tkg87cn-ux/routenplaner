@@ -25,6 +25,7 @@
   /* Steigung: ein Farbton, hell nach dunkel */
   --slope-0: #c3ccce; --slope-1: #f0a36b; --slope-2: #e0672f; --slope-3: #b23c12; --slope-4: #6e1d08;
   /* Untergrund und Wegtyp: feste kategoriale Reihenfolge */
+  --wind-head: #d03b3b; --wind-tail: #6250d6;
   --cat-1: #2a78d6; --cat-2: #eb6834; --cat-3: #1baf7a; --cat-4: #eda100; --cat-5: #6250d6; --cat-0: #b4bcbe;
 
   --font: Barlow, system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -47,6 +48,7 @@
     --danger: #ff8a80;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 28px rgba(0, 0, 0, .5);
     --slope-0: #3d5157; --slope-1: #f0a36b; --slope-2: #e0672f; --slope-3: #c14a1e; --slope-4: #8f2a10;
+    --wind-head: #e66767; --wind-tail: #9085e9;
     --cat-1: #3987e5; --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #9085e9; --cat-0: #51656a;
   }
 }
@@ -150,6 +152,29 @@ a { color: inherit; }
 .cand-tag { font-size: 12px; color: var(--ink-2); }
 .cand-nums { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 13px; color: var(--ink-2); }
 .cand-nums b { font: 600 16px/1.2 var(--font-num); color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* Abfahrt und Wetter */
+.wx-when { display: grid; grid-template-columns: 1fr 128px; gap: 8px; }
+.wx-body { margin-top: 12px; display: grid; gap: 10px; }
+.wx-body:empty { display: none; }
+.wx-lead { font: 600 22px/1.15 var(--font-num); }
+.wx-lead small { font: 500 15px/1.2 var(--font); color: var(--ink-2); }
+.wx-facts { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; color: var(--ink-2); }
+.wx-facts b { color: var(--ink); font-weight: 600; }
+.wx-hints { display: grid; gap: 6px; }
+.wx-hint { background: var(--field); border-radius: var(--r); padding: 9px 12px; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.wx-hint.warn { background: var(--accent-soft); }
+.wx-hint .ghost-btn { flex: none; background: var(--panel); }
+.wx-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.wx-table th { text-align: right; font-weight: 500; color: var(--muted); padding: 4px 0 4px 8px; border-bottom: 1px solid var(--line); }
+.wx-table td { text-align: right; padding: 5px 0 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.wx-table th:first-child, .wx-table td:first-child { text-align: left; padding-left: 0; }
+.wx-table tr:last-child td { border-bottom: 0; }
+.wx-table .rel { color: var(--ink-2); }
+.wx-arrow { width: 13px; height: 13px; vertical-align: -2px; margin-right: 3px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.wind-head { background: var(--wind-head); fill: var(--wind-head); }
+.wind-tail { background: var(--wind-tail); fill: var(--wind-tail); }
+.wind-side { background: var(--cat-0); fill: var(--cat-0); }
 
 /* Optionen */
 .fold > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-2); }
@@ -308,7 +333,7 @@ a { color: inherit; }
   .stat-wide { display: none; }
   .dock-side { width: 100%; }
   .alt-wrap { justify-content: space-between; }
-  #profileChart { height: 112px; margin-top: 6px; }
+  #profileChart { height: 118px; margin-top: 6px; }
   .lg-gap { margin-left: 0; }
   #panel.sheet-peek .dock-side, #panel.sheet-peek #profileChart, #panel.sheet-peek .chart-legend { display: none; }
   #panel.sheet-peek .dock { border-bottom: 0; }

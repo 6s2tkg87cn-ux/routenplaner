@@ -5,6 +5,7 @@ import {
 } from './routing.js';
 import { createProfileChart } from './elevation.js';
 import { generateRoundTrips } from './roundtrip.js';
+import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
 const h = (tag, props = {}, ...kids) => {
@@ -35,7 +36,8 @@ const state = {
   layerV: 2,
   mode: 'route',
   loop: false,
-  round: { km: 50, dir: 'any', climb: 'any' },
+  round: { km: 50, dir: 'any', climb: 'any', wind: true },
+  departTime: '',
   waypoints: [emptyWp(), emptyWp()],
   nogos: [],
   favorites: [],
@@ -56,6 +58,7 @@ function load() {
     if (s.mode === 'round') state.mode = 'round';
     state.loop = !!s.loop;
     if (s.round) state.round = { ...state.round, ...s.round };
+    if (typeof s.departTime === 'string') state.departTime = s.departTime;
     if (Array.isArray(s.waypoints) && s.waypoints.length >= 2) state.waypoints = s.waypoints.map((w) => ({ ...emptyWp(), ...w, id: uid() }));
     if (Array.isArray(s.nogos)) state.nogos = s.nogos.map((n) => ({ ...n, id: uid() }));
     if (Array.isArray(s.favorites)) state.favorites = s.favorites;
@@ -607,7 +610,7 @@ function showRoute() {
   $('tourBlock').hidden = !has;
   document.body.classList.toggle('has-route', has);
   setOverlay('route', has ? { type: 'FeatureCollection', features: [lineFeature(route)] } : EMPTY);
-  if (!has) { chart.setRoute(null); placeDock(); return; }
+  if (!has) { chart.setRoute(null); placeDock(); scheduleWeather(); return; }
 
   $('stDist').innerHTML = `${fmt(route.dist / 1000, route.dist < 100000 ? 1 : 0)}<small> km</small>`;
   $('stUp').innerHTML = route.hasEle ? `${fmt(route.ascent)}<small> m</small>` : '–';
@@ -618,6 +621,7 @@ function showRoute() {
   renderComposition();
   placeDock();
   chart.setRoute(route);
+  scheduleWeather();
 
   if (!state.tourName) $('tourName').placeholder = defaultTourName();
   if (fitNext) {
@@ -702,10 +706,19 @@ async function runRoundTrip() {
   setRoundBusy(true, 'Die App probiert mehrere Richtungen aus. Das dauert einen Moment.');
   $('busy').hidden = false;
   try {
+    let wind = null;
+    if (state.round.wind) {
+      // Wind am Start zur Abfahrtszeit; ohne Wetterdaten wird die Runde trotzdem berechnet
+      try {
+        const fc = await fetchForecast([{ lat: start.lat, lon: start.lon }], ctrl.signal);
+        const w = weatherAt(fc[0], departUnix());
+        if (w && w.wind != null) wind = { from: w.wdir, speed: w.wind };
+      } catch (e) { if (e.name === 'AbortError') throw e; }
+    }
     const res = await generateRoundTrips({
       start: { lat: start.lat, lon: start.lon }, km, climb: state.round.climb,
       direction: state.round.dir === 'any' ? null : +state.round.dir,
-      profile: state.profile, options: state.options[state.profile], nogos: state.nogos, signal: ctrl.signal,
+      profile: state.profile, options: state.options[state.profile], nogos: state.nogos, signal: ctrl.signal, wind,
       onProgress: (done, total) => { if (ctrl === roundCtrl) setRoundBusy(true, `${done} von ${total} Richtungen berechnet …`); },
     });
     if (ctrl !== roundCtrl) return;
@@ -765,7 +778,8 @@ function renderCandidates() {
         h('span', {}, h('b', { text: fmt(r.dist / 1000, 1) }), ' km'),
         h('span', {}, h('b', { text: fmt(r.ascent) }), ' hm'),
         h('span', {}, h('b', { text: formatTime(r.dist / 1000 / state.speeds[state.profile]).replace(' h', '') }), ' h'),
-        h('span', {}, h('b', { text: fmt(unpaved) }), ' % unbefestigt')))));
+        h('span', {}, h('b', { text: fmt(unpaved) }), ' % unbefestigt')),
+      c.windNote ? h('span', { class: 'cand-tag', text: c.windNote }) : null)));
   });
 }
 
@@ -808,6 +822,8 @@ function initRound() {
   renderClimb();
   $('btnRound').addEventListener('click', runRoundTrip);
   $('btnEditWp').addEventListener('click', () => { state.mode = 'route'; save(); renderMode(); renderWaypoints(); });
+  $('roundWind').checked = state.round.wind;
+  $('roundWind').addEventListener('change', () => { state.round.wind = $('roundWind').checked; save(); });
   $('loopSwitch').addEventListener('change', () => {
     state.loop = $('loopSwitch').checked;
     fitNext = true;
@@ -815,6 +831,151 @@ function initRound() {
   });
   renderLoop();
   renderMode();
+}
+
+// ---------------------------------------------------------------- Abfahrt und Wetter
+
+let departDay = 0, wxCtrl = null, wxTimer = 0;
+const clock = (t) => new Date(t * 1000).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+
+function dayStartUnix() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + departDay);
+  return d.getTime() / 1000;
+}
+function departUnix() {
+  const [hh, mm] = ($('wxTime').value || '10:00').split(':').map(Number);
+  return dayStartUnix() + hh * 3600 + (mm || 0) * 60;
+}
+
+function reverseRoute() {
+  // Bei Hin und zurück bleibt der Start, nur die Reihenfolge der übrigen Punkte dreht sich
+  if (state.loop) state.waypoints = [state.waypoints[0], ...state.waypoints.slice(1).reverse()];
+  else state.waypoints.reverse();
+  renderWaypoints();
+  changed();
+}
+
+function initWeather() {
+  const sel = $('wxDay');
+  for (let i = 0; i < 7; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() + i);
+    const label = i === 0 ? 'Heute' : i === 1 ? 'Morgen' : d.toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'numeric' });
+    sel.append(h('option', { value: i, text: label }));
+  }
+  sel.addEventListener('change', () => { departDay = +sel.value; scheduleWeather(); });
+  const time = $('wxTime');
+  const next = new Date(Date.now() + 3600 * 1000);
+  time.value = state.departTime || String(Math.min(20, Math.max(6, next.getHours()))).padStart(2, '0') + ':00';
+  time.addEventListener('change', () => { if (time.value) { state.departTime = time.value; save(); scheduleWeather(); } });
+  renderWeather(null);
+}
+
+function scheduleWeather() {
+  clearTimeout(wxTimer);
+  wxTimer = setTimeout(updateWeather, 250);
+}
+
+async function updateWeather() {
+  if (wxCtrl) wxCtrl.abort();
+  if (!route) { chart.setWind(null); return renderWeather(null); }
+  wxCtrl = new AbortController();
+  const ctrl = wxCtrl, r = route;
+  if (!$('wxBody').dataset.filled) renderWeather(null, 'Wetter wird geladen …');
+  try {
+    const samples = samplePoints(r);
+    const fcs = await fetchForecast(samples, ctrl.signal);
+    if (ctrl !== wxCtrl || r !== route) return;
+    const start = departUnix(), speed = state.speeds[state.profile];
+    const a = analyze(r, samples, fcs, start, speed);
+    if (!a) { chart.setWind(null); return renderWeather(null, 'Für diesen Zeitpunkt gibt es keine Vorhersage. Wähle eine Abfahrt in den nächsten sieben Tagen.'); }
+    const closed = state.loop || Math.hypot(r.lat[0] - r.lat[r.n - 1], r.lon[0] - r.lon[r.n - 1]) < 0.003;
+    const rev = closed ? analyze(r, samples, fcs, start, speed, true) : null;
+    const best = bestStart(r, samples, fcs, dayStartUnix(), speed);
+    chart.setWind(a.bins);
+    renderWeather({ a, rev, best, closed });
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    chart.setWind(null);
+    renderWeather(null, e instanceof WeatherError ? e.message : 'Das Wetter konnte nicht ausgewertet werden.');
+    if (!(e instanceof WeatherError)) console.error(e);
+  }
+}
+
+function windArrow(from) {
+  // Pfeil zeigt, wohin der Wind weht
+  const t = document.createElement('template');
+  t.innerHTML = `<svg class="wx-arrow" viewBox="0 0 14 14" style="transform:rotate(${Math.round(from + 180)}deg)" aria-hidden="true"><path d="M7 12V2M3 6l4-4 4 4"/></svg>`;
+  return t.content.firstChild;
+}
+
+function renderWeather(w, note) {
+  const body = $('wxBody');
+  body.replaceChildren();
+  delete body.dataset.filled;
+  for (const e of document.querySelectorAll('.lg-wind')) e.hidden = !w;
+  if (!w) {
+    body.append(h('p', { class: 'hint', style: 'margin:0', text: note || 'Sobald eine Route steht, siehst du hier Wetter und Wind entlang der Strecke.' }));
+    return;
+  }
+  body.dataset.filled = '1';
+  const { a, rev, best, closed } = w;
+  const temp = Math.round(a.tMin) === Math.round(a.tMax) ? `${fmt(a.tMin)} °C` : `${fmt(a.tMin)} bis ${fmt(a.tMax)} °C`;
+  const lead = h('div', { class: 'wx-lead' }, temp + ' ', h('small', { text: codeText(a.code) }));
+  const dry = a.maxProb < 20 && a.rain < 0.1;
+  const facts = h('ul', { class: 'wx-facts' },
+    h('li', {}, 'Wind ', h('b', { text: `${fmt(a.wind)} km/h aus ${compass(a.wdir)}` }), a.gust >= a.wind + 8 ? `, Böen bis ${fmt(a.gust)} km/h` : ''),
+    h('li', {}, 'Regen ', h('b', { text: dry ? 'bleibt voraussichtlich trocken' : `Risiko bis ${fmt(a.maxProb)} %` }), !dry && a.rain >= 0.1 ? `, etwa ${fmt(a.rain, 1)} mm` : ''),
+    h('li', {}, 'Unterwegs ', h('b', { text: `${clock(a.start)} bis ${clock(a.end)} Uhr` })));
+
+  // Anteile Gegen-, Seiten- und Rückenwind
+  const share = h('div', { class: 'comp', style: 'margin-top:0' }, h('h3', { text: 'Wind auf der Strecke' }));
+  const track = h('div', { class: 'cbar', role: 'img', 'aria-label': 'Windanteile' }), legend = h('ul', { class: 'clegend' });
+  for (const [cls, label, v] of [['head', 'Gegenwind', a.headShare], ['side', 'Seitenwind oder kaum Wind', a.sideShare], ['tail', 'Rückenwind', a.tailShare]]) {
+    if (v < 0.005) continue;
+    track.append(h('span', { class: 'wind-' + cls, style: `flex:${(v * 100).toFixed(1)} 0 0` }));
+    legend.append(h('li', {}, h('i', { class: 'sw wind-' + cls }), h('span', { text: label }), h('span', {}), h('span', { class: 'cl-pct', text: fmt(v * 100) + ' %' })));
+  }
+  share.append(track, legend);
+
+  // Hinweise
+  const hints = h('div', { class: 'wx-hints' });
+  const hint = (text, opts = {}) => hints.append(h('div', { class: 'wx-hint' + (opts.warn ? ' warn' : '') }, h('span', { text }),
+    opts.action ? h('button', { type: 'button', class: 'ghost-btn', text: opts.label, onclick: opts.action }) : null));
+  if (best && best.t !== a.start && penalty(a) - best.p > 0.5) {
+    const why = [];
+    if (a.maxProb - best.a.maxProb >= 15) why.push('geringeres Regenrisiko');
+    if (a.meanComp - best.a.meanComp >= 3 || a.wind - best.a.wind >= 4) why.push('weniger Wind von vorn');
+    if (a.night && !best.a.night) why.push('Tageslicht');
+    if ((a.tMin < 5 && best.a.tMin > a.tMin + 2) || (a.tMax > 28 && best.a.tMax < a.tMax - 2)) why.push('angenehmere Temperatur');
+    hint(`Besser um ${clock(best.t)} Uhr starten` + (why.length ? ': ' + why.join(', ') + '.' : '.'), { label: 'Übernehmen',
+      action: () => { $('wxTime').value = clock(best.t); state.departTime = $('wxTime').value; save(); scheduleWeather(); } });
+  }
+  if (closed && rev && a.wind >= 10) {
+    if (rev.lateComp < a.lateComp - 3) hint('Andersherum hast du auf dem Heimweg mehr Rückenwind.', { label: 'Richtung umkehren', action: reverseRoute });
+    else if (a.lateComp < -3) hint('Gute Richtung: Gegenwind zuerst, Rückenwind auf dem Heimweg.');
+  }
+  if (a.firstWet) hint(a.firstWet.d < 1000 ? 'Regen ist schon bei der Abfahrt wahrscheinlich.' : `Regen ist ab etwa km ${fmt(a.firstWet.d / 1000)} wahrscheinlich (${clock(a.firstWet.t)} Uhr).`, { warn: true });
+  if (a.rows.some((r) => r.code >= 95)) hint('Unterwegs sind Gewitter möglich.', { warn: true });
+  if (a.gust >= 50) hint(`Kräftige Böen bis ${fmt(a.gust)} km/h.`, { warn: true });
+  if (a.sunset && a.end > a.sunset - 900 && a.start < a.sunset) hint(`Sonnenuntergang um ${clock(a.sunset)} Uhr, Ankunft gegen ${clock(a.end)} Uhr. Nimm Licht mit.`, { warn: true });
+  else if (a.night) hint('Ein Teil der Fahrt liegt im Dunkeln. Nimm Licht mit.', { warn: true });
+
+  // Verlauf entlang der Strecke
+  const table = h('table', { class: 'wx-table' }, h('thead', {}, h('tr', {},
+    h('th', { text: 'km' }), h('th', { text: 'Uhrzeit' }), h('th', { text: '°C' }), h('th', { text: 'Regen' }), h('th', { text: 'Wind' }), h('th', { text: '' }))));
+  const tb = h('tbody', {});
+  for (const r of a.rows) {
+    tb.append(h('tr', {}, h('td', { text: fmt(r.d / 1000) }), h('td', { text: clock(r.t) }), h('td', { text: fmt(r.temp) }),
+      h('td', { text: fmt(r.pprob || 0) + ' %' }), h('td', {}, windArrow(r.wdir), fmt(r.wind) + ' km/h'), h('td', { class: 'rel', text: r.rel })));
+  }
+  table.append(tb);
+
+  body.append(lead, facts);
+  if (hints.children.length) body.append(hints);
+  body.append(share, table);
 }
 
 // ---------------------------------------------------------------- Export
@@ -915,6 +1076,7 @@ function init() {
   load();
   initMap();
   initRound();
+  initWeather();
   chart = createProfileChart($('profileChart'), { onHover: (d, p) => setHover(d, p) });
   initSheet();
   placeDock();
@@ -934,7 +1096,7 @@ function init() {
     renderWaypoints();
     $('wpList').querySelectorAll('input')[at].focus();
   });
-  $('btnReverse').addEventListener('click', () => { state.waypoints.reverse(); renderWaypoints(); changed(); });
+  $('btnReverse').addEventListener('click', reverseRoute);
   $('btnNew').addEventListener('click', () => {
     state.waypoints = [emptyWp(), emptyWp()];
     state.nogos = [];
@@ -953,7 +1115,7 @@ function init() {
   });
   $('speedInput').addEventListener('change', () => {
     const v = parseFloat($('speedInput').value);
-    if (v >= 5 && v <= 60) { state.speeds[state.profile] = v; save(); renderTime(); } else $('speedInput').value = state.speeds[state.profile];
+    if (v >= 5 && v <= 60) { state.speeds[state.profile] = v; save(); renderTime(); scheduleWeather(); } else $('speedInput').value = state.speeds[state.profile];
   });
   $('btnLocate').addEventListener('click', () => locate(null));
   $('btnGpx').addEventListener('click', downloadGpx);
