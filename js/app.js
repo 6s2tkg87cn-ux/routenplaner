@@ -43,6 +43,7 @@ const state = {
   poiCats: [],
   folds: {},
   detourKm: '',
+  chartH: { desktop: 110, mobile: 90 },
   waypoints: [emptyWp(), emptyWp()],
   nogos: [],
   favorites: [],
@@ -68,6 +69,7 @@ function load() {
     if (Array.isArray(s.poiCats)) state.poiCats = s.poiCats.filter((c) => POI_CATS[c]);
     if (s.folds && typeof s.folds === 'object') state.folds = s.folds;
     if (s.detourKm) state.detourKm = s.detourKm;
+    if (s.chartH && s.chartH.desktop > 0 && s.chartH.mobile > 0) state.chartH = s.chartH;
     if (Array.isArray(s.waypoints) && s.waypoints.length >= 2) state.waypoints = s.waypoints.map((w) => ({ ...emptyWp(), ...w, id: uid() }));
     if (Array.isArray(s.nogos)) state.nogos = s.nogos.map((n) => ({ ...n, id: uid() }));
     if (Array.isArray(s.favorites)) state.favorites = s.favorites;
@@ -1348,6 +1350,33 @@ function initSheet() {
   }
 }
 
+// Höhe des Höhenprofils: am Griff ziehen, wird je Gerät gemerkt
+function applyChartHeight() {
+  $('dock').style.setProperty('--chart-h', state.chartH[isMobile() ? 'mobile' : 'desktop'] + 'px');
+}
+function initChartGrip() {
+  const grip = $('chartGrip');
+  let drag = null;
+  applyChartHeight();
+  grip.addEventListener('pointerdown', (ev) => {
+    const key = isMobile() ? 'mobile' : 'desktop';
+    drag = { id: ev.pointerId, y0: ev.clientY, h0: state.chartH[key], key };
+    grip.setPointerCapture(ev.pointerId);
+    grip.classList.add('active');
+    ev.preventDefault();
+  });
+  grip.addEventListener('pointermove', (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    // Am Desktop sitzt der Griff über dem Profil (hochziehen = größer), am Handy darunter (runterziehen = größer)
+    const dy = (ev.clientY - drag.y0) * (drag.key === 'mobile' ? 1 : -1);
+    state.chartH[drag.key] = Math.round(Math.max(60, Math.min(drag.key === 'mobile' ? 220 : 320, drag.h0 + dy)));
+    applyChartHeight();
+  });
+  const end = (ev) => { if (!drag || ev.pointerId !== drag.id) return; drag = null; grip.classList.remove('active'); save(); };
+  grip.addEventListener('pointerup', end);
+  grip.addEventListener('pointercancel', end);
+}
+
 function initFolds() {
   for (const d of document.querySelectorAll('details[data-fold]')) {
     const key = d.dataset.fold;
@@ -1364,8 +1393,9 @@ function init() {
   initWeather();
   chart = createProfileChart($('profileChart'), { onHover: (d, p) => setHover(d, p) });
   initSheet();
+  initChartGrip();
   placeDock();
-  window.matchMedia('(max-width: 820px)').addEventListener('change', () => { placeDock(); setSheet(sheetMode); });
+  window.matchMedia('(max-width: 820px)').addEventListener('change', () => { placeDock(); setSheet(sheetMode); applyChartHeight(); });
 
   renderProfile();
   renderOptions();

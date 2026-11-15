@@ -317,7 +317,13 @@ a { color: inherit; }
 .alt-label { font-size: 12px; color: var(--muted); font-weight: 500; }
 .alt-wrap .seg button { padding: 5px 11px; font: 600 14px/1.2 var(--font-num); }
 
-#profileChart { height: 148px; margin-top: 10px; position: relative; }
+.dock { display: flex; flex-direction: column; }
+#profileChart { height: var(--chart-h, 110px); margin-top: 4px; position: relative; order: 2; }
+.chart-legend { order: 3; }
+/* Griff zum Ändern der Profilhöhe: am Desktop über dem Profil, am Handy darunter */
+.chart-grip { order: 1; border: 0; background: none; height: 14px; margin-top: 4px; padding: 0; display: grid; place-items: center; cursor: ns-resize; touch-action: none; }
+.chart-grip span { width: 36px; height: 4px; border-radius: 2px; background: var(--line); }
+.chart-grip:hover span, .chart-grip.active span { background: var(--muted); }
 .chart svg { display: block; width: 100%; height: 100%; touch-action: pan-y; cursor: crosshair; }
 .chart-grid line { stroke: var(--line); stroke-width: 1; }
 .chart-grid text { font: 500 11px var(--font); fill: var(--muted); font-variant-numeric: tabular-nums; }
@@ -358,7 +364,9 @@ a { color: inherit; }
   .stat-wide { display: none; }
   .dock-side { width: 100%; }
   .alt-wrap { justify-content: space-between; }
-  #profileChart { height: 118px; margin-top: 6px; }
+  #profileChart { height: var(--chart-h, 90px); margin-top: 6px; }
+  .chart-grip { order: 2; height: 20px; margin-top: 0; }
+  .chart-grip span { width: 44px; }
   .lg-gap { margin-left: 0; }
   body[data-sheet=full] .chart-legend { display: none; }
   /* Beim Tippen zählt der Platz für Eingabefeld und Vorschläge */
