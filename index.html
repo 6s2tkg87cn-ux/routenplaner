@@ -181,10 +181,24 @@
       <button id="btnLocate" class="tool-btn" type="button" title="Mein Standort">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
       </button>
+      <button id="btnNav" class="nav-start" type="button" hidden>Navigation starten</button>
     </div>
     <div id="windBadge" class="wind-badge" hidden></div>
     <div id="offlineBadge" class="offline-badge" hidden>Offline: nur gespeicherte Touren</div>
     <div id="toast" class="toast" role="status" hidden></div>
+    <div id="navTop" class="nav-top" hidden>
+      <div id="navIcon" class="nav-icon"></div>
+      <div class="nav-text"><div id="navDist" class="nav-dist"></div><div id="navHint" class="nav-hint"></div></div>
+    </div>
+    <button id="navCenter" class="nav-center" type="button" hidden>Zentrieren</button>
+    <div id="navBottom" class="nav-bottom" hidden>
+      <dl class="stats">
+        <div class="stat"><dt>Noch</dt><dd id="navRest">–</dd></div>
+        <div class="stat"><dt>Bergauf</dt><dd id="navUp">–</dd></div>
+        <div class="stat"><dt>Ankunft</dt><dd id="navEta">–</dd></div>
+      </dl>
+      <button id="navStop" class="ghost-btn" type="button">Beenden</button>
+    </div>
     <div id="dockSlotDesktop"></div>
   </main>
 </div>

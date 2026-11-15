@@ -1,6 +1,6 @@
 /* global maplibregl */
 import {
-  PROFILES, DEFAULT_OPTIONS, travelHours, fetchRoute, RouteError, nearestIndex, pointAt, toGpx, parseGpx, simplifyTrack,
+  PROFILES, DEFAULT_OPTIONS, travelHours, projectOnRoute, routeBearing, haversine, fetchRoute, RouteError, nearestIndex, pointAt, toGpx, parseGpx, simplifyTrack,
   SURFACES, SURFACE_LABEL, WAYS, WAY_LABEL,
 } from './routing.js';
 import { createProfileChart } from './elevation.js';
@@ -228,6 +228,7 @@ function initMap() {
     save();
   });
   map.on('click', (ev) => {
+    if (nav) return;
     toggleLayerMenu(false);
     const box = [[ev.point.x - 9, ev.point.y - 9], [ev.point.x + 9, ev.point.y + 9]];
     const layers = ['route-hit', 'cand-hit'].filter((id) => map.getLayer(id));
@@ -527,6 +528,7 @@ function showMe(pos) {
   lastPos = { lat: pos.coords.latitude, lon: pos.coords.longitude, at: Date.now() };
   if (!meMarker) meMarker = new maplibregl.Marker({ element: h('div', { class: 'me-dot', title: 'Mein Standort' }) }).setLngLat([lastPos.lon, lastPos.lat]).addTo(map);
   else meMarker.setLngLat([lastPos.lon, lastPos.lat]);
+  if (nav) navUpdate(pos);
 }
 
 function startWatch(center) {
@@ -537,12 +539,12 @@ function startWatch(center) {
   watchId = navigator.geolocation.watchPosition((pos) => {
     showMe(pos);
     if (center) { center = false; hideToast(); go(); }
-  }, () => {
+  }, (err) => {
     if (center) toast('Der Standort ist nicht verfügbar. Erlaube den Zugriff in den Einstellungen des Browsers.');
     center = false;
-    navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
+    // Nur bei verweigertem Zugriff aufgeben; ein kurzer GPS-Ausfall (Tunnel, Wald) darf die Ortung nicht beenden
+    if (err && err.code === 1) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
 }
 
 function locate(index) {
@@ -731,6 +733,7 @@ function showRoute() {
   const has = !!route;
   $('dock').hidden = !has;
   $('tourBlock').hidden = !has;
+  $('btnNav').hidden = !has;
   document.body.classList.toggle('has-route', has);
   setOverlay('route', has ? { type: 'FeatureCollection', features: [lineFeature(route)] } : EMPTY);
   setOverlay('sel', EMPTY);
@@ -1167,6 +1170,181 @@ function renderWeather(w, note) {
   body.append(lead, facts);
   if (hints.children.length) body.append(hints);
   body.append(share);
+}
+
+// ---------------------------------------------------------------- Navigation
+
+let nav = null, wakeLock = null;
+
+async function keepAwake(on) {
+  try {
+    if (on && navigator.wakeLock && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+    if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch (e) { wakeLock = null; }
+}
+
+function startNav() {
+  if (!route) return;
+  if (!navigator.geolocation) return toast('Dieser Browser kann den Standort nicht bestimmen.', true);
+  nav = { d: 0, off: 0, follow: true, heading: routeBearing(route, 0), last: null, rerouteAt: 0, busy: false, arrived: false };
+  closeMenu();
+  chart.clearSelection();
+  setOverlay('sel', EMPTY);
+  document.body.classList.add('navigating');
+  for (const id of ['navTop', 'navBottom']) $(id).hidden = false;
+  $('navCenter').hidden = true;
+  keepAwake(true);
+  setTimeout(() => map.resize(), 50);
+  navRender({ wait: true });
+  startWatch(false);
+  if (lastPos && Date.now() - lastPos.at < 15000) navUpdate({ coords: { latitude: lastPos.lat, longitude: lastPos.lon, accuracy: 20 } });
+  else navCamera(route.lat[0], route.lon[0]);
+}
+
+function stopNav() {
+  if (!nav) return;
+  nav = null;
+  keepAwake(false);
+  document.body.classList.remove('navigating');
+  for (const id of ['navTop', 'navBottom', 'navCenter']) $(id).hidden = true;
+  setTimeout(() => { map.resize(); map.easeTo({ bearing: 0, duration: 400 }); if (route) fitRoute(route); if (isMobile()) setSheet(sheetMode); }, 60);
+}
+
+// Karte folgt dem Standort und dreht sich in Fahrtrichtung; der Standort liegt im unteren Drittel
+function navCamera(lat, lon) {
+  if (!nav || !nav.follow) return;
+  const h2 = map.getContainer().clientHeight;
+  map.easeTo({ center: [lon, lat], bearing: nav.heading, zoom: Math.max(map.getZoom(), PROFILES[state.profile].foot ? 16.5 : 16), offset: [0, h2 * 0.18], duration: 800, easing: (t) => t });
+}
+
+function navUpdate(pos) {
+  if (!nav || !route) return;
+  const lat = pos.coords.latitude, lon = pos.coords.longitude, acc = pos.coords.accuracy || 20;
+  // Fahrtrichtung aus der Bewegung (Kompasswert des Geräts, sonst aus den letzten Positionen)
+  let moved = 0;
+  if (nav.last) moved = haversine(nav.last.lat, nav.last.lon, lat, lon);
+  let heading = null;
+  if (Number.isFinite(pos.coords.heading) && pos.coords.speed > 0.8) heading = pos.coords.heading;
+  else if (nav.last && moved > 6) {
+    const r = Math.PI / 180, y = Math.sin((lon - nav.last.lon) * r) * Math.cos(lat * r);
+    const x = Math.cos(nav.last.lat * r) * Math.sin(lat * r) - Math.sin(nav.last.lat * r) * Math.cos(lat * r) * Math.cos((lon - nav.last.lon) * r);
+    heading = Math.atan2(y, x) / r;
+  }
+  if (!nav.last || moved > 6) nav.last = { lat, lon };
+
+  // Position auf der Route: erst in der Nähe der letzten Stelle suchen, dann überall (Abkürzung)
+  const limit = Math.max(50, acc * 1.5);
+  let m = projectOnRoute(route, lat, lon, nav.d - 150, nav.d + 1500);
+  if (m.dist > limit) { const all = projectOnRoute(route, lat, lon); if (all.dist < Math.min(m.dist, limit)) m = all; }
+  const onRoute = m.dist <= limit;
+  if (onRoute) { nav.d = m.d; nav.off = 0; } else nav.off++;
+
+  // Im Stand flattert die Richtung: dann an der Route ausrichten
+  nav.heading = heading != null ? heading : onRoute ? routeBearing(route, nav.d) : nav.heading;
+  navCamera(lat, lon);
+  chart.setCursor(onRoute ? nav.d : null);
+
+  if (nav.off >= 2) {
+    // Neben der Route: mit Internet neu berechnen, sonst Richtung zurück zeigen
+    const back = projectOnRoute(route, lat, lon);
+    if (online() && !nav.busy && Date.now() - nav.rerouteAt > 20000) navReroute(lat, lon);
+    const r = Math.PI / 180, y = Math.sin((back.lon - lon) * r) * Math.cos(back.lat * r);
+    const x = Math.cos(lat * r) * Math.sin(back.lat * r) - Math.sin(lat * r) * Math.cos(back.lat * r) * Math.cos((back.lon - lon) * r);
+    return navRender({ back: { dist: back.dist, rel: Math.atan2(y, x) / r - nav.heading }, busy: nav.busy });
+  }
+  navRender({});
+}
+
+async function navReroute(lat, lon) {
+  nav.busy = true;
+  nav.rerouteAt = Date.now();
+  try {
+    // offene Wegpunkte: alle, die auf der bisherigen Route noch vor uns liegen
+    const here = projectOnRoute(route, lat, lon).d, rest = [];
+    let from = 0;
+    const wps = state.waypoints.filter((w) => w.lat != null);
+    wps.forEach((w, i) => {
+      if (i === 0) return;
+      const d = projectOnRoute(route, w.lat, w.lon, from).d;
+      from = d;
+      if (d > here + 40) rest.push({ id: uid(), lat: w.lat, lon: w.lon, label: w.label });
+    });
+    const start = wps[0];
+    if (state.loop) rest.push({ id: uid(), lat: start.lat, lon: start.lon, label: start.label });
+    if (!rest.length) { const end = wps[wps.length - 1]; rest.push({ id: uid(), lat: end.lat, lon: end.lon, label: end.label }); }
+    const pts = [{ lat, lon }, ...rest];
+    const r = await fetchRoute({ profile: state.profile, options: state.options[state.profile], points: pts, nogos: state.nogos });
+    if (!nav) return;
+    // Die Planung zeigt ab jetzt den Rest der Tour ab dem aktuellen Standort
+    state.waypoints = [{ id: uid(), lat, lon, label: 'Standort' }, ...rest];
+    state.loop = false;
+    renderLoop(); renderWaypoints(); save();
+    route = r;
+    storedPois = null;
+    fitNext = false;
+    showRoute();
+    nav.d = 0; nav.off = 0;
+    navRender({});
+  } catch (e) {
+    /* nächster Versuch nach der Wartezeit; bis dahin zeigt der Pfeil zurück zur Route */
+  } finally { if (nav) nav.busy = false; }
+}
+
+function navArrow(angle) {
+  // Pfeil mit Knick: Schaft von unten, Spitze in Abbiegerichtung
+  const a = (Math.max(-160, Math.min(160, angle)) * Math.PI) / 180;
+  const x = 30 + 20 * Math.sin(a), y = 32 - 20 * Math.cos(a);
+  const hx = (da) => (x - 10 * Math.sin(a + da)).toFixed(1) + ' ' + (y + 10 * Math.cos(a + da)).toFixed(1);
+  return `<svg viewBox="0 0 60 60"><path d="M30 54V32L${x.toFixed(1)} ${y.toFixed(1)}"/><path d="M${hx(0.6)}L${x.toFixed(1)} ${y.toFixed(1)}L${hx(-0.6)}"/></svg>`;
+}
+const navDistText = (m) => (m < 1000 ? fmt(Math.max(10, Math.round(m / 10) * 10)) + ' m' : fmt(m / 1000, 1) + ' km');
+
+function navRender({ wait, back, busy }) {
+  if (!nav || !route) return;
+  const top = $('navTop'), rest = Math.max(0, route.dist - nav.d);
+  top.classList.toggle('warn', !!back);
+  if (wait) {
+    $('navIcon').innerHTML = navArrow(0); $('navDist').textContent = 'Standort …'; $('navHint').textContent = 'Warte auf GPS';
+  } else if (back) {
+    $('navIcon').innerHTML = navArrow(((back.rel + 540) % 360) - 180);
+    $('navDist').textContent = navDistText(back.dist);
+    $('navHint').textContent = busy ? 'Route wird neu berechnet …' : online() ? 'Neben der Route' : 'Zurück zur Route';
+  } else if (rest < 30) {
+    nav.arrived = true;
+    $('navIcon').innerHTML = '<svg viewBox="0 0 60 60"><path d="M16 32l10 10 18-22"/></svg>';
+    $('navDist').textContent = 'Ziel'; $('navHint').textContent = 'Du bist angekommen';
+  } else {
+    const t = (route.turns || []).find((k) => k.d > nav.d + 8);
+    if (!t) {
+      $('navIcon').innerHTML = navArrow(0); $('navDist').textContent = navDistText(rest); $('navHint').textContent = 'Dem Weg bis zum Ziel folgen';
+    } else {
+      const dist = t.d - nav.d, a = t.angle, abs = Math.abs(a), side = a < 0 ? 'links' : 'rechts';
+      $('navDist').textContent = navDistText(dist);
+      if (t.exit) {
+        $('navIcon').innerHTML = `<svg viewBox="0 0 60 60"><circle cx="30" cy="30" r="15"/><text x="30" y="38" text-anchor="middle">${t.exit}</text></svg>`;
+        $('navHint').textContent = `Kreisverkehr, ${t.exit}. Ausfahrt`;
+      } else {
+        $('navIcon').innerHTML = navArrow(dist > 1000 ? 0 : a);
+        $('navHint').textContent = dist > 1000 ? 'Geradeaus, dann ' + side : abs > 150 ? 'Wenden' : abs > 110 ? 'Scharf ' + side : abs < 40 ? 'Leicht ' + side : side === 'links' ? 'Links abbiegen' : 'Rechts abbiegen';
+      }
+    }
+  }
+  // Rest: Strecke, Höhenmeter bergauf, Ankunft
+  let up = 0, ref = pointAt(route, nav.d).ele;
+  for (let i = pointAt(route, nav.d).i + 1; i < route.n; i++) { const dd = route.ele[i] - ref; if (dd > 4) { up += dd; ref = route.ele[i]; } else if (dd < -4) ref = route.ele[i]; }
+  $('navRest').innerHTML = `${fmt(rest / 1000, 1)}<small> km</small>`;
+  $('navUp').innerHTML = route.hasEle ? `${fmt(up)}<small> m</small>` : '–';
+  const hours = tourHours(route) * (rest / (route.dist || 1));
+  $('navEta').textContent = new Date(Date.now() + hours * 3600000).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+}
+
+function initNav() {
+  $('btnNav').addEventListener('click', startNav);
+  $('navStop').addEventListener('click', stopNav);
+  $('navCenter').addEventListener('click', () => { if (!nav) return; nav.follow = true; $('navCenter').hidden = true; if (lastPos) navCamera(lastPos.lat, lastPos.lon); });
+  // Wer die Karte selbst verschiebt, schaut sich um: Nachführen pausieren, bis „Zentrieren" getippt wird
+  map.on('dragstart', () => { if (nav) { nav.follow = false; $('navCenter').hidden = false; } });
+  document.addEventListener('visibilitychange', () => { if (nav && document.visibilityState === 'visible') keepAwake(true); });
 }
 
 // ---------------------------------------------------------------- Export
@@ -1608,6 +1786,7 @@ function init() {
   $('btnSelClear').addEventListener('click', () => { chart.clearSelection(); selectRange(null); });
   initSheet();
   initChartGrip();
+  initNav();
   placeDock();
   window.matchMedia('(max-width: 820px)').addEventListener('change', () => { placeDock(); setSheet(sheetMode); applyChartHeight(); });
 

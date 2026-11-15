@@ -161,7 +161,7 @@ export async function fetchRoute({ profile, options, points, nogos = [], alt = 0
   for (let attempt = 0; attempt < 2; attempt++) {
     const id = await uploadProfile(text, signal);
     const url = BROUTER + '?lonlats=' + encodeURIComponent(lonlats) + '&profile=' + id + '&alternativeidx=' + alt +
-      '&format=geojson' + (nogoStr ? '&nogos=' + encodeURIComponent(nogoStr) : '');
+      '&format=geojson&timode=2' + (nogoStr ? '&nogos=' + encodeURIComponent(nogoStr) : '');
     let res;
     try {
       res = await fetch(url, { signal });
@@ -303,7 +303,58 @@ export function parseRoute(geojson) {
     wayShare[s.way] = (wayShare[s.way] || 0) + (s.to - s.from);
   }
 
-  return { lat, lon, ele, cum, n, dist, ascent, descent, minEle, maxEle, hasEle, sections, surfaceShare, wayShare, sacShare, unknownLen };
+  const base = { lat, lon, ele, cum, n, dist, ascent, descent, minEle, maxEle, hasEle, sections, surfaceShare, wayShare, sacShare, unknownLen };
+  base.turns = findTurns(base, p.voicehints);
+  return base;
+}
+
+function bearingAt(route, d0, d1) {
+  const a = pointAt(route, Math.max(0, d0)), b = pointAt(route, Math.min(route.dist, d1));
+  const r = Math.PI / 180, y = Math.sin((b.lon - a.lon) * r) * Math.cos(b.lat * r);
+  const x = Math.cos(a.lat * r) * Math.sin(b.lat * r) - Math.sin(a.lat * r) * Math.cos(b.lat * r) * Math.cos((b.lon - a.lon) * r);
+  return Math.atan2(y, x) / r;
+}
+export const routeBearing = (route, d) => bearingAt(route, d, d + 25);
+
+// Abbiegepunkte: bevorzugt die Hinweise des Routing-Servers (nur an echten Abzweigen),
+// sonst aus der Form der Strecke geschätzt. Winkel: negativ = links, positiv = rechts.
+function findTurns(route, hints) {
+  const turns = [];
+  if (Array.isArray(hints) && hints.length) {
+    for (const h of hints) {
+      const i = h[0], exit = h[2] || 0, angle = h[4] || 0;
+      if (!(i >= 0 && i < route.n) || (Math.abs(angle) < 20 && !exit)) continue;
+      turns.push({ d: route.cum[i], angle, exit: Math.abs(exit) });
+    }
+    return turns;
+  }
+  for (let i = 1; i < route.n - 1; i++) {
+    const d = route.cum[i];
+    if (d < 20 || d > route.dist - 20) continue;
+    let ang = bearingAt(route, d + 3, d + 25) - bearingAt(route, d - 25, d - 3);
+    ang = ((ang + 540) % 360) - 180;
+    if (Math.abs(ang) < 55) continue;
+    const last = turns[turns.length - 1];
+    if (last && d - last.d < 40) { if (Math.abs(ang) > Math.abs(last.angle)) { last.d = d; last.angle = ang; } continue; }
+    turns.push({ d, angle: ang, exit: 0, guessed: true });
+  }
+  return turns;
+}
+
+// Nächster Punkt auf der Strecke zu einer Position, gesucht zwischen zwei Distanzen. Liefert Abstand und Streckendistanz.
+export function projectOnRoute(route, lat, lon, dFrom = 0, dTo = Infinity) {
+  const i0 = pointAt(route, Math.max(0, dFrom)).i, i1 = Math.min(route.n - 2, pointAt(route, Math.min(route.dist, dTo)).i);
+  const k = Math.cos(lat * Math.PI / 180) * 111320, M = 111320;
+  let best = { dist: Infinity, d: 0, lat, lon };
+  for (let i = i0; i <= i1; i++) {
+    const ax = (route.lon[i] - lon) * k, ay = (route.lat[i] - lat) * M, bx = (route.lon[i + 1] - lon) * k, by = (route.lat[i + 1] - lat) * M;
+    const dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+    const t = len ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len)) : 0;
+    const dist = Math.hypot(ax + t * dx, ay + t * dy);
+    if (dist < best.dist) best = { dist, d: route.cum[i] + t * (route.cum[i + 1] - route.cum[i]),
+      lat: route.lat[i] + t * (route.lat[i + 1] - route.lat[i]), lon: route.lon[i] + t * (route.lon[i + 1] - route.lon[i]) };
+  }
+  return best;
 }
 
 // Index des Streckenpunkts, der einer Position am nächsten liegt.
