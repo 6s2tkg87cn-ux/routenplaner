@@ -1,4 +1,9 @@
 /* global maplibregl */
+// Rückenwind: Oberfläche und Ablauf der App.
+// Aufbau dieser Datei: Zustand · Karte · Wegpunkte · Suche und Standort · Sperrzonen · Optionen · Route ·
+// Vorschläge (Rundtour, Umweg) · Abfahrt und Wetter · Navigation · Export · Meine Touren und Offline ·
+// Stopps · Oberfläche (Bottom-Sheet, Höhenprofil) · Start.
+// Rechnen und Daten liegen in eigenen Dateien: routing.js, roundtrip.js, weather.js, pois.js, offline.js, elevation.js.
 import {
   PROFILES, DEFAULT_OPTIONS, travelHours, projectOnRoute, routeBearing, haversine, fetchRoute, RouteError, nearestIndex, pointAt, toGpx, parseGpx, simplifyTrack,
   SURFACES, SURFACE_LABEL, WAYS, WAY_LABEL,
@@ -733,6 +738,7 @@ function showRoute() {
   const has = !!route;
   $('dock').hidden = !has;
   $('tourBlock').hidden = !has;
+  $('poiBlock').hidden = !has;
   $('btnNav').hidden = !has || !canNavigate();
   document.body.classList.toggle('has-route', has);
   setOverlay('route', has ? { type: 'FeatureCollection', features: [lineFeature(route)] } : EMPTY);
@@ -1770,6 +1776,13 @@ function initChartGrip() {
   grip.addEventListener('pointercancel', end);
 }
 
+function initLegend() {
+  const btn = $('btnLegend'), legend = $('chartLegend');
+  const apply = () => { legend.hidden = !state.folds.legend; btn.setAttribute('aria-expanded', String(!!state.folds.legend)); btn.textContent = state.folds.legend ? 'Legende ausblenden' : 'Legende'; };
+  btn.addEventListener('click', () => { state.folds.legend = !state.folds.legend; save(); apply(); });
+  apply();
+}
+
 function initFolds() {
   for (const d of document.querySelectorAll('details[data-fold]')) {
     const key = d.dataset.fold;
@@ -1788,6 +1801,7 @@ function init() {
   $('btnSelClear').addEventListener('click', () => { chart.clearSelection(); selectRange(null); });
   initSheet();
   initChartGrip();
+  initLegend();
   initNav();
   placeDock();
   window.matchMedia('(max-width: 820px)').addEventListener('change', () => { placeDock(); setSheet(sheetMode); applyChartHeight(); });

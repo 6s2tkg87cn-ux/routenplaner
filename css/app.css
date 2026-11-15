@@ -58,7 +58,7 @@ html, body { height: 100%; margin: 0; }
 body { font: 400 15px/1.45 var(--font); color: var(--ink); background: var(--bg); -webkit-font-smoothing: antialiased; overscroll-behavior: none; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
-h2 { font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 0 0 10px; }
+h2 { font: 600 17px/1.2 var(--font-num); color: var(--ink); letter-spacing: .01em; margin: 0 0 12px; }
 h3 { font-size: 13px; font-weight: 500; color: var(--ink-2); margin: 0 0 6px; }
 a { color: inherit; }
 [hidden] { display: none !important; }
@@ -211,17 +211,13 @@ body.navigating .me-dot::after { content: ''; position: absolute; left: 50%; top
 .wx-facts { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; color: var(--ink-2); }
 .wx-facts b { color: var(--ink); font-weight: 600; }
 .wx-hints { display: grid; gap: 6px; }
+.wx-speed { margin-top: 10px; }
+.chart-foot { order: 3; display: flex; justify-content: flex-end; margin-top: 2px; }
+.chart-foot .link-btn { font-size: 12px; padding: 2px; }
 #wxMapRow { margin-top: 12px; }
 .wx-hint { background: var(--field); border-radius: var(--r); padding: 9px 12px; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
 .wx-hint.warn { background: var(--accent-soft); }
 .wx-hint .ghost-btn { flex: none; background: var(--panel); }
-/* (Tabelle entfällt) */
-.wx-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
-.wx-table th { text-align: right; font-weight: 500; color: var(--muted); padding: 4px 0 4px 8px; border-bottom: 1px solid var(--line); }
-.wx-table td { text-align: right; padding: 5px 0 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-.wx-table th:first-child, .wx-table td:first-child { text-align: left; padding-left: 0; }
-.wx-table tr:last-child td { border-bottom: 0; }
-.wx-table .rel { color: var(--ink-2); }
 .wx-arrow { width: 13px; height: 13px; vertical-align: -2px; margin-right: 3px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .wind-head { background: var(--wind-head); fill: var(--wind-head); }
 .wind-tail { background: var(--wind-tail); fill: var(--wind-tail); }
@@ -229,7 +225,7 @@ body.navigating .me-dot::after { content: ''; position: absolute; left: 50%; top
 
 /* Optionen */
 .fold-body { margin-top: 14px; }
-.fold > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.fold > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; cursor: pointer; font: 600 17px/1.2 var(--font-num); color: var(--ink); letter-spacing: .01em; }
 .fold > summary::-webkit-details-marker { display: none; }
 .fold > summary > span::after { content: ''; display: inline-block; width: 7px; height: 7px; margin-left: 8px; border-right: 1.8px solid currentColor; border-bottom: 1.8px solid currentColor; transform: translateY(-1px) rotate(-45deg); transition: transform .15s; }
 .fold[open] > summary > span::after { transform: translateY(-3px) rotate(45deg); }
@@ -265,7 +261,6 @@ body.navigating .me-dot::after { content: ''; position: absolute; left: 50%; top
 .cl-val, .cl-pct { text-align: right; font-variant-numeric: tabular-nums; }
 .cl-pct { color: var(--muted); }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
-.export-row { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
 
 .credits { border-top: 1px solid var(--line); padding-top: 14px; font-size: 12px; color: var(--muted); }
 
@@ -316,15 +311,10 @@ body.navigating .me-dot::after { content: ''; position: absolute; left: 50%; top
 .maplibregl-ctrl-attrib { background: color-mix(in srgb, var(--panel) 82%, transparent) !important; color: var(--ink-2); font-size: 11px; }
 .maplibregl-ctrl-attrib a { color: inherit !important; }
 .me-dot { width: 18px; height: 18px; border-radius: 50%; background: #1a73e8; border: 3px solid #fff; box-shadow: 0 0 0 7px rgba(26, 115, 232, .22), 0 1px 4px rgba(0, 0, 0, .4); pointer-events: none; }
-.wind-pin { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: #fff; border: 2px solid var(--cat-0); color: #12262b; box-shadow: 0 1px 3px rgba(0, 0, 0, .35); pointer-events: none; }
-.wind-pin .wx-arrow { margin: 0; width: 14px; height: 14px; vertical-align: 0; }
-.wind-pin-head { background: var(--wind-head); border-color: #fff; color: #fff; }
-.wind-pin-tail { background: var(--wind-tail); border-color: #fff; color: #fff; }
 .wind-badge { position: absolute; top: 12px; left: 60px; z-index: 800; background: var(--panel); border-radius: var(--r); box-shadow: var(--shadow); padding: 0 12px; height: 40px; display: flex; align-items: center; gap: 4px; font-size: 14px; color: var(--ink-2); }
 .wind-badge b { color: var(--ink); font-weight: 600; }
 .wind-key { display: inline-flex; align-items: center; gap: 4px; margin-left: 10px; font-size: 12px; }
-.wind-badge .wx-arrow { width: 16px; height: 16px; color: var(--ink); }
-.poi { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #fff; background: #12262b; box-shadow: 0 1px 4px rgba(0, 0, 0, .4); font-size: 14px; line-height: 1; padding: 0; display: grid; place-items: center; cursor: pointer; }
+.wind-badge .poi { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #fff; background: #12262b; box-shadow: 0 1px 4px rgba(0, 0, 0, .4); font-size: 14px; line-height: 1; padding: 0; display: grid; place-items: center; cursor: pointer; }
 .poi-wasser { background: #2a78d6; }
 .poi-unsure { opacity: .6; border-style: dashed; }
 .menu-note { padding: 0 10px 4px; font-size: 13px; color: var(--ink-2); max-width: 220px; }
@@ -414,7 +404,6 @@ body.navigating .me-dot::after { content: ''; position: absolute; left: 50%; top
   .chart-grip { order: 2; height: 20px; margin-top: 0; }
   .chart-grip span { width: 44px; }
   .lg-gap { margin-left: 0; }
-  body[data-sheet=full] .chart-legend { display: none; }
   /* Beim Tippen zählt der Platz für Eingabefeld und Vorschläge */
   body.typing .dock { display: none; }
 

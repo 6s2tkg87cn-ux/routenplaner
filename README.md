@@ -34,6 +34,14 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 ## Aufbau
 
 - `index.html`, `css/app.css`, `js/` – die App (kein Build-Schritt nötig)
+  - `js/app.js` – Oberfläche und Ablauf
+  - `js/routing.js` – Profile, BRouter-Abfrage, Auswertung der Strecke, GPX
+  - `js/roundtrip.js` – Rundtouren und Umwege auf Wunschlänge
+  - `js/weather.js` – Wetter und Wind entlang der Strecke
+  - `js/pois.js` – Stopps an der Strecke
+  - `js/offline.js` – Offline-Touren
+  - `js/elevation.js` – Höhenprofil
+- `sw.js` – Service Worker (App-Dateien und Offline-Karte)
 - `profiles/` – Routing-Profile, die die App an BRouter schickt
 - `tools/build_profiles.py` – erzeugt die Profile aus den offiziellen BRouter-Profilen in `tools/`
 - `vendor/` – MapLibre GL JS und die Schrift Barlow

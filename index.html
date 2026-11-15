@@ -84,11 +84,15 @@
       </section>
 
       <details class="block fold" data-fold="wx" open>
-        <summary><span>Abfahrt und Wetter</span></summary>
+        <summary><span>Abfahrt, Tempo und Wetter</span></summary>
         <div class="fold-body">
           <div class="wx-when">
             <select id="wxDay" class="select" aria-label="Tag der Abfahrt"></select>
             <input id="wxTime" class="text-input" type="time" step="900" aria-label="Uhrzeit der Abfahrt">
+          </div>
+          <div class="form-grid form-grid-wide wx-speed">
+            <label class="form-label" for="speedInput" id="speedLabel">Durchschnitt mit dem Rennrad</label>
+            <span class="num-field"><input id="speedInput" type="number" inputmode="decimal" min="2" max="60" step="0.5"> km/h</span>
           </div>
           <div id="wxBody" class="wx-body"></div>
           <div class="row-toggle" id="wxMapRow">
@@ -106,6 +110,21 @@
         </div>
       </details>
 
+      <details class="block fold" id="poiBlock" data-fold="poi" open hidden>
+        <summary><span>Stopps an der Strecke</span></summary>
+        <div class="fold-body">
+          <div id="poiChips" class="chips"></div>
+          <div class="form-grid form-grid-wide poi-radius">
+            <label class="form-label" for="poiRadius">Umkreis um die Strecke</label>
+            <select id="poiRadius" class="select">
+              <option value="100">100 m</option><option value="300">300 m</option><option value="500">500 m</option>
+              <option value="1000">1 km</option><option value="2000">2 km</option><option value="5000">5 km</option>
+            </select>
+          </div>
+          <p class="hint" id="poiStatus" hidden></p>
+        </div>
+      </details>
+
       <details class="block fold" id="nogoBlock" data-fold="nogo" open hidden>
         <summary><span>Sperrzonen</span></summary>
         <div class="fold-body"><ul id="nogoList" class="nogo-list"></ul></div>
@@ -117,18 +136,6 @@
           <label class="field-label" for="tourName">Name</label>
           <input id="tourName" class="text-input" type="text" autocomplete="off" placeholder="Name der Tour">
           <div id="composition"></div>
-          <div class="comp">
-            <h3>Stopps an der Strecke</h3>
-            <div id="poiChips" class="chips"></div>
-            <div class="form-grid form-grid-wide poi-radius">
-              <label class="form-label" for="poiRadius">Umkreis um die Strecke</label>
-              <select id="poiRadius" class="select">
-                <option value="100">100 m</option><option value="300">300 m</option><option value="500">500 m</option>
-                <option value="1000">1 km</option><option value="2000">2 km</option><option value="5000">5 km</option>
-              </select>
-            </div>
-            <p class="hint" id="poiStatus" hidden></p>
-          </div>
           <div class="btn-row btn-row-top">
             <button id="btnGpx" class="primary-btn" type="button">GPX herunterladen</button>
             <button id="btnShare" class="ghost-btn" type="button" hidden>Teilen</button>
@@ -147,16 +154,6 @@
           <div class="btn-row btn-row-top">
             <button id="btnImport" class="ghost-btn" type="button">GPX importieren</button>
             <input id="gpxFile" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml" hidden>
-          </div>
-        </div>
-      </details>
-
-      <details class="block fold" data-fold="set">
-        <summary><span>Mein Tempo</span></summary>
-        <div class="fold-body">
-          <div class="form-grid form-grid-wide">
-            <label class="form-label" for="speedInput" id="speedLabel">Durchschnitt mit dem Rennrad</label>
-            <span class="num-field"><input id="speedInput" type="number" inputmode="decimal" min="2" max="60" step="0.5"> km/h</span>
           </div>
         </div>
       </details>
@@ -225,7 +222,8 @@
   </div>
   <div id="profileChart"></div>
   <button id="chartGrip" class="chart-grip" type="button" aria-label="Höhe des Höhenprofils ändern" title="Ziehen, um das Höhenprofil größer oder kleiner zu machen"><span></span></button>
-  <div class="chart-legend" aria-label="Legende">
+  <div class="chart-foot"><button id="btnLegend" class="link-btn" type="button" aria-expanded="false">Legende</button></div>
+  <div class="chart-legend" id="chartLegend" aria-label="Legende" hidden>
     <span class="lg-title">Steigung</span>
     <span><i class="sw slope-1"></i>3–6 %</span><span><i class="sw slope-2"></i>6–9 %</span>
     <span><i class="sw slope-3"></i>9–12 %</span><span><i class="sw slope-4"></i>über 12 %</span>

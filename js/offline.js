@@ -20,7 +20,6 @@ async function tx(mode, fn) {
     t.onerror = t.onabort = () => { db.close(); reject(t.error); };
   });
 }
-export const getOffline = (id) => tx('readonly', (s) => s.get(id));
 export const listOffline = () => tx('readonly', (s) => s.getAll());
 const putOffline = (rec) => tx('readwrite', (s) => s.put(rec));
 const cacheName = (id) => 'rw-off-' + id;
