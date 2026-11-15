@@ -329,6 +329,10 @@ a { color: inherit; }
 .chart-grid text { font: 500 11px var(--font); fill: var(--muted); font-variant-numeric: tabular-nums; }
 .chart-line { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .chart-base { stroke: var(--muted); stroke-width: 1; }
+.chart-sel { fill: var(--ink); fill-opacity: .14; stroke: var(--ink); stroke-width: 1; stroke-opacity: .6; pointer-events: none; }
+.chart svg { -webkit-user-select: none; user-select: none; }
+.sel-info { order: 1; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 8px; font-size: 13px; color: var(--ink-2); }
+.sel-info b { color: var(--ink); font-weight: 600; }
 .chart-cross line { stroke: var(--ink); stroke-width: 1; }
 .chart-cross circle { fill: var(--route); stroke: var(--panel); stroke-width: 2; }
 .chart-tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--panel); border-radius: 6px; padding: 7px 10px; font-size: 13px; display: grid; white-space: nowrap; z-index: 5; }

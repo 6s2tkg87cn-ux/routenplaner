@@ -102,7 +102,7 @@ const LAYERS = {
 let map, chart, hoverMarker = null, popup = null;
 let markers = [], nogoMarkers = [];
 const EMPTY = { type: 'FeatureCollection', features: [] };
-const overlay = { route: EMPTY, cands: EMPTY, nogo: EMPTY, wind: EMPTY };
+const overlay = { route: EMPTY, cands: EMPTY, nogo: EMPTY, wind: EMPTY, sel: EMPTY };
 
 // Weißer Winkel, der in Fahrtrichtung zeigt (wird entlang der Route wiederholt)
 function chevronImage() {
@@ -133,7 +133,7 @@ function setLayer(key) {
 // nach jedem Stilwechsel neu angelegt.
 function addOverlays() {
   if (map.getSource('route')) return;
-  for (const k of ['nogo', 'cands', 'wind', 'route']) map.addSource(k, { type: 'geojson', data: overlay[k] });
+  for (const k of ['nogo', 'cands', 'wind', 'route', 'sel']) map.addSource(k, { type: 'geojson', data: overlay[k] });
   if (!map.hasImage('chevron')) map.addImage('chevron', chevronImage(), { pixelRatio: 2 });
   const round = { 'line-cap': 'round', 'line-join': 'round' };
   map.addLayer({ id: 'nogo-fill', type: 'fill', source: 'nogo', paint: { 'fill-color': '#b3261e', 'fill-opacity': 0.14 } });
@@ -146,6 +146,8 @@ function addOverlays() {
     paint: { 'line-color': ['match', ['get', 'cls'], 'head', '#d03b3b', '#6250d6'], 'line-width': 15, 'line-opacity': 0.9 } });
   map.addLayer({ id: 'route-casing', type: 'line', source: 'route', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 9, 'line-opacity': 0.95 } });
   map.addLayer({ id: 'route-line', type: 'line', source: 'route', layout: round, paint: { 'line-color': '#d0146a', 'line-width': 5 } });
+  // im Höhenprofil ausgewählter Abschnitt
+  map.addLayer({ id: 'sel-line', type: 'line', source: 'sel', layout: round, paint: { 'line-color': '#12262b', 'line-width': 5 } });
   // kleine Pfeile in Fahrtrichtung
   map.addLayer({ id: 'route-dir', type: 'symbol', source: 'route', layout: { 'symbol-placement': 'line', 'symbol-spacing': 110,
     'icon-image': 'chevron', 'icon-size': 0.9, 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-rotation-alignment': 'map' } });
@@ -676,6 +678,8 @@ function showRoute() {
   $('tourBlock').hidden = !has;
   document.body.classList.toggle('has-route', has);
   setOverlay('route', has ? { type: 'FeatureCollection', features: [lineFeature(route)] } : EMPTY);
+  setOverlay('sel', EMPTY);
+  $('selInfo').hidden = true;
   if (!has) { chart.setRoute(null); placeDock(); scheduleWeather(); schedulePois(); return; }
 
   $('stDist').innerHTML = `${fmt(route.dist / 1000, route.dist < 100000 ? 1 : 0)}<small> km</small>`;
@@ -704,6 +708,29 @@ function showRoute() {
 function renderTime() {
   if (!route) return;
   $('stTime').innerHTML = formatTime(route.dist / 1000 / state.speeds[state.profile]).replace(' h', '<small> h</small>');
+}
+
+// Im Höhenprofil gewählter Bereich: Kennzahlen zeigen, auf der Karte hervorheben und dorthin zoomen
+function selectRange(range) {
+  $('selInfo').hidden = !range;
+  if (!range || !route) {
+    setOverlay('sel', EMPTY);
+    if (route && !range) fitRoute(route);
+    return;
+  }
+  const [a, b] = range, pa = pointAt(route, a), pb = pointAt(route, b);
+  let up = 0, down = 0, ref = pa.ele;
+  const step = (e) => { const d = e - ref; if (d > 4) { up += d; ref = e; } else if (d < -4) { down -= d; ref = e; } };
+  for (let i = pa.i + 1; i <= pb.i; i++) step(route.ele[i]);
+  step(pb.ele);
+  const len = b - a, slope = ((pb.ele - pa.ele) / len) * 100;
+  $('selText').replaceChildren('Auswahl ', h('b', { text: `${fmt(len / 1000, 1)} km` }), `, km ${fmt(a / 1000, 1)} bis ${fmt(b / 1000, 1)}, `,
+    h('b', { text: `${fmt(up)} m` }), ' bergauf, ', h('b', { text: `${fmt(down)} m` }), ` bergab, im Schnitt ${fmt(slope, 1)} %`);
+  const f = sliceFeature(route, a, b, {});
+  setOverlay('sel', { type: 'FeatureCollection', features: [f] });
+  let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+  for (const [lon, lat] of f.geometry.coordinates) { w = Math.min(w, lon); e = Math.max(e, lon); s = Math.min(s, lat); n = Math.max(n, lat); }
+  map.fitBounds([[w, s], [e, n]], { padding: fitPadding(), duration: 700, maxZoom: 16 });
 }
 
 function setHover(d, p) {
@@ -1392,7 +1419,8 @@ function init() {
   initMap();
   initRound();
   initWeather();
-  chart = createProfileChart($('profileChart'), { onHover: (d, p) => setHover(d, p) });
+  chart = createProfileChart($('profileChart'), { onHover: (d, p) => setHover(d, p), onSelect: selectRange });
+  $('btnSelClear').addEventListener('click', () => { chart.clearSelection(); selectRange(null); });
   initSheet();
   initChartGrip();
   placeDock();

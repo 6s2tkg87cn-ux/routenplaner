@@ -26,7 +26,7 @@ function niceStep(range, target) {
 
 const fmt = (v, digits = 0) => v.toLocaleString('de-DE', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
-export function createProfileChart(host, { onHover }) {
+export function createProfileChart(host, { onHover, onSelect }) {
   host.classList.add('chart');
   const svg = el('svg', { role: 'img', 'aria-label': 'Höhenprofil der Route' });
   const tip = document.createElement('div');
@@ -34,7 +34,7 @@ export function createProfileChart(host, { onHover }) {
   tip.hidden = true;
   host.append(svg, tip);
 
-  let route = null, geom = null, wind = null;
+  let route = null, geom = null, wind = null, sel = null, drag = null;
 
   function draw() {
     svg.replaceChildren();
@@ -117,13 +117,27 @@ export function createProfileChart(host, { onHover }) {
       svg.append(wb);
     }
 
+    // Ausgewählter Bereich
+    const selRect = el('rect', { class: 'chart-sel', y: m.t, height: ph, visibility: 'hidden' });
+    svg.append(selRect);
+
     // Fadenkreuz
     const cross = el('g', { class: 'chart-cross', visibility: 'hidden' });
     const cl = el('line', { y1: m.t, y2: base });
     const cd = el('circle', { r: 4.5 });
     cross.append(cl, cd);
     svg.append(cross);
-    geom = { m, pw, ph, W, H, x, y, cross, cl, cd, win };
+    geom = { m, pw, ph, W, H, x, y, cross, cl, cd, win, selRect };
+    paintSel(sel);
+  }
+
+  function paintSel(range) {
+    if (!geom) return;
+    if (!range) { geom.selRect.setAttribute('visibility', 'hidden'); return; }
+    const a = geom.x(Math.min(range[0], range[1])), b = geom.x(Math.max(range[0], range[1]));
+    geom.selRect.setAttribute('x', a);
+    geom.selRect.setAttribute('width', Math.max(1, b - a));
+    geom.selRect.setAttribute('visibility', 'visible');
   }
 
   function showAt(d, fromChart) {
@@ -164,14 +178,45 @@ export function createProfileChart(host, { onHover }) {
     const px = ev.clientX - r.left;
     return ((px - geom.m.l) / geom.pw) * route.dist;
   }
-  svg.addEventListener('pointermove', (ev) => { const d = fromEvent(ev); if (d != null) showAt(d, true); });
-  svg.addEventListener('pointerdown', (ev) => { const d = fromEvent(ev); if (d != null) showAt(d, true); });
-  svg.addEventListener('pointerleave', () => { showAt(null); onHover(null); });
+  const clamp = (d) => Math.max(0, Math.min(route.dist, d));
+  svg.addEventListener('pointermove', (ev) => {
+    const d = fromEvent(ev);
+    if (d == null) return;
+    showAt(d, true);
+    // Waagerecht ziehen wählt einen Bereich aus
+    if (drag && ev.pointerId === drag.id) {
+      if (Math.abs(ev.clientX - drag.x0) > 6) drag.active = true;
+      if (drag.active) paintSel([drag.d0, clamp(d)]);
+    }
+  });
+  svg.addEventListener('pointerdown', (ev) => {
+    const d = fromEvent(ev);
+    if (d == null) return;
+    showAt(d, true);
+    drag = { id: ev.pointerId, x0: ev.clientX, d0: clamp(d), active: false };
+    try { svg.setPointerCapture(ev.pointerId); } catch (e) { /* nicht kritisch */ }
+  });
+  const finish = (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    const g = drag;
+    drag = null;
+    if (g.active) {
+      const d1 = clamp(fromEvent(ev)), a = Math.min(g.d0, d1), b = Math.max(g.d0, d1);
+      sel = b - a >= Math.max(100, route.dist * 0.01) ? [a, b] : null;
+    } else if (sel) sel = null; // einfacher Tipp hebt die Auswahl auf
+    else return;
+    paintSel(sel);
+    if (onSelect) onSelect(sel);
+  };
+  svg.addEventListener('pointerup', finish);
+  svg.addEventListener('pointercancel', (ev) => { if (drag && ev.pointerId === drag.id) { drag = null; paintSel(sel); } });
+  svg.addEventListener('pointerleave', () => { if (!drag) { showAt(null); onHover(null); } });
 
   new ResizeObserver(() => draw()).observe(host);
 
   return {
-    setRoute(r) { route = r; tip.hidden = true; draw(); },
+    setRoute(r) { route = r; sel = null; drag = null; tip.hidden = true; draw(); },
+    clearSelection() { sel = null; paintSel(null); },
     setCursor(d) { showAt(d, false); },
     setWind(bins) { wind = bins && bins.length ? bins : null; draw(); },
   };
