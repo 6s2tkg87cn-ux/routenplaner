@@ -1,6 +1,6 @@
 /* global maplibregl */
 import {
-  PROFILES, DEFAULT_OPTIONS, fetchRoute, RouteError, nearestIndex, pointAt, toGpx, parseGpx, simplifyTrack,
+  PROFILES, DEFAULT_OPTIONS, travelHours, fetchRoute, RouteError, nearestIndex, pointAt, toGpx, parseGpx, simplifyTrack,
   SURFACES, SURFACE_LABEL, WAYS, WAY_LABEL,
 } from './routing.js';
 import { createProfileChart } from './elevation.js';
@@ -566,21 +566,30 @@ function renderNogos() {
 
 const STEP3 = ['egal', 'gern', 'möglichst viel'];
 // Reihenfolge ist für alle Radtypen gleich: erst die gemeinsamen Optionen, dann die speziellen.
+const BIKES = ['rennrad', 'gravel', 'alltag'];
 const OPTION_DEFS = [
-  { key: 'traffic', label: 'Autoverkehr', steps: ['egal', 'normal', 'wenig', 'kaum'] },
-  { key: 'elevation', label: 'Höhenmeter', steps: [['flat', 'flach halten'], ['balanced', 'ausgewogen'], ['nosteep', 'Rampen meiden']] },
+  { key: 'sac', label: 'Schwierigkeit höchstens', steps: [[1, 'T1'], [2, 'T2'], [3, 'T3'], [4, 'T4'], [5, 'T5/T6']], only: ['wandern'], main: true,
+    note: 'T1 Talweg, T2 einfacher Bergweg (Alpenverein: blau), T3 mittelschwer (rot), T4 schwer (schwarz), T5/T6 alpin, oft weglos. Schwerere Wege sind gesperrt.' },
+  { key: 'traffic', label: 'Autoverkehr', steps: ['egal', 'normal', 'wenig', 'kaum'], only: BIKES, main: true },
+  { key: 'elevation', label: 'Höhenmeter', steps: [['flat', 'flach halten'], ['balanced', 'ausgewogen'], ['nosteep', 'Rampen meiden']], only: BIKES, main: true },
+  { key: 'elevation', label: 'Höhenmeter', steps: [['flat', 'möglichst wenig'], ['balanced', 'egal']], only: ['wandern'], main: true },
   { key: 'forest', label: 'Wald', steps: STEP3 },
   { key: 'river', label: 'Flüsse und Seen', steps: STEP3 },
   { key: 'town', label: 'Ortschaften', steps: ['egal', 'eher meiden', 'umfahren'] },
-  { key: 'noMain', label: 'Bundesstraßen meiden' },
+  { key: 'noMain', label: 'Bundesstraßen meiden', only: BIKES, main: true },
   { key: 'ferries', label: 'Fähren erlauben' },
   { key: 'cycleways', label: 'Radwege mitnutzen', only: ['rennrad'] },
   { key: 'cobble', label: 'Kopfsteinpflaster meiden', only: ['rennrad'] },
   { key: 'strictPaved', label: 'Schotter strikt ausschließen', note: 'Sonst sind kurze Stücke erlaubt, wenn sie einen großen Umweg sparen.', only: ['rennrad'] },
   { key: 'preferUnpaved', label: 'Schotterwege bevorzugen', only: ['gravel'] },
   { key: 'trails', label: 'Pfade und Trails erlauben', note: 'Auch schmale, verwurzelte Wege.', only: ['gravel'] },
-  { key: 'wet', label: 'Nasse Verhältnisse', note: 'Meidet Wege, die bei Nässe schmierig werden.', only: ['gravel'] },
+  { key: 'wet', label: 'Nasse Verhältnisse', note: 'Meidet Wege, die bei Nässe schmierig werden.', only: ['gravel', 'wandern'] },
   { key: 'cycleRoutes', label: 'Ausgeschilderten Radrouten folgen', only: ['gravel', 'alltag'] },
+  { key: 'hikingRoutes', label: 'Markierte Wanderwege bevorzugen', only: ['wandern'] },
+  { key: 'paths', label: 'Pfade statt Straßen und Forstwege', only: ['wandern'] },
+  { key: 'visibility', label: 'Schlecht erkennbare Wege meiden', only: ['wandern'] },
+  { key: 'ferrata', label: 'Klettersteige erlauben', only: ['wandern'],
+    note: 'Nur mit Klettersteigset und Erfahrung. Der Grad des Klettersteigs lässt sich nicht einschränken.' },
 ];
 
 function renderOptions() {
@@ -590,7 +599,7 @@ function renderOptions() {
   let special = false;
   for (const def of OPTION_DEFS) {
     if (def.only && !def.only.includes(state.profile)) continue;
-    if (def.only && !special) { special = true; list.append(h('h3', { class: 'opt-group', text: 'Nur für ' + PROFILES[state.profile].label })); }
+    if (def.only && !def.main && !special) { special = true; list.append(h('h3', { class: 'opt-group', text: 'Nur für ' + PROFILES[state.profile].label })); }
     if (def.steps) {
       const seg = h('div', { class: 'seg seg-small', role: 'radiogroup', 'aria-label': def.label });
       def.steps.forEach((s, i) => {
@@ -598,7 +607,7 @@ function renderOptions() {
         seg.append(h('button', { type: 'button', role: 'radio', 'aria-checked': String(o[def.key] === val), text,
           onclick: () => { o[def.key] = val; renderOptions(); changed(); } }));
       });
-      list.append(h('div', { class: 'opt opt-steps' }, h('span', { class: 'opt-label', text: def.label }), seg));
+      list.append(h('div', { class: 'opt opt-steps' }, h('span', { class: 'opt-label', text: def.label }), seg, def.note ? h('span', { class: 'opt-note', text: def.note }) : null));
     } else {
       const id = 'opt-' + def.key;
       const box = h('input', { type: 'checkbox', id, class: 'switch', checked: !!o[def.key],
@@ -615,9 +624,17 @@ function renderProfile() {
   seg.replaceChildren();
   for (const key in PROFILES) {
     seg.append(h('button', { type: 'button', role: 'radio', 'aria-checked': String(state.profile === key), text: PROFILES[key].label,
-      onclick: () => { state.profile = key; renderProfile(); renderOptions(); changed(); } }));
+      onclick: () => {
+        // Rundtour-Länge an Rad oder Fuß anpassen
+        const foot = !!PROFILES[key].foot;
+        if (foot && state.round.km > 40) state.round.km = 12;
+        if (!foot && state.round.km < 15) state.round.km = 50;
+        $('roundKm').value = state.round.km;
+        state.profile = key; renderProfile(); renderOptions(); changed();
+      } }));
   }
-  $('speedLabel').textContent = { rennrad: 'Durchschnitt mit dem Rennrad', gravel: 'Durchschnitt mit dem Gravelbike', alltag: 'Durchschnitt im Alltag' }[state.profile];
+  $('speedLabel').textContent = { rennrad: 'Durchschnitt mit dem Rennrad', gravel: 'Durchschnitt mit dem Gravelbike', alltag: 'Durchschnitt im Alltag', wandern: 'Gehtempo in der Ebene' }[state.profile];
+  renderRoundChips();
   $('speedInput').value = state.speeds[state.profile];
 }
 
@@ -666,6 +683,9 @@ async function calcRoute() {
   }
 }
 
+const tourHours = (r) => travelHours(r, state.profile, state.speeds[state.profile]);
+const tourSpeed = (r) => r.dist / 1000 / tourHours(r); // tatsächliches Durchschnittstempo inkl. Höhenmeter
+
 function formatTime(hours) {
   const min = Math.round(hours * 60);
   return Math.floor(min / 60) + ':' + String(min % 60).padStart(2, '0') + ' h';
@@ -707,7 +727,8 @@ function showRoute() {
 
 function renderTime() {
   if (!route) return;
-  $('stTime').innerHTML = formatTime(route.dist / 1000 / state.speeds[state.profile]).replace(' h', '<small> h</small>');
+  $('stTime').innerHTML = formatTime(tourHours(route)).replace(' h', '<small> h</small>');
+  document.querySelector('#stTime').previousElementSibling.textContent = PROFILES[state.profile].foot ? 'Gehzeit' : 'Fahrzeit';
 }
 
 // Im Höhenprofil gewählter Bereich: Kennzahlen zeigen, auf der Karte hervorheben und dorthin zoomen
@@ -766,6 +787,20 @@ function renderComposition() {
     }
     host.append(h('div', { class: 'comp' }, h('h3', { text: title }), track, legend));
   };
+  if (PROFILES[state.profile].foot) {
+    // Hinweise zur Schwierigkeit (Angaben aus OpenStreetMap)
+    const notes = h('div', { class: 'wx-hints', style: 'margin-top:14px' });
+    const note = (text, warn) => notes.append(h('div', { class: 'wx-hint' + (warn ? ' warn' : '') }, h('span', { text })));
+    const km = (v) => fmt(v / 1000, 1) + ' km';
+    const sh = route.sacShare, hard = (sh[5] || 0) + (sh[6] || 0);
+    if (route.unknownLen > 0) note(`${km(route.unknownLen)} mit unbekanntem Wegtyp, möglicherweise Klettersteig. Vor der Tour unbedingt prüfen.`, true);
+    if (hard > 0) note(`${km(hard)} alpine Route (T5/T6): oft weglos, Kletterstellen, nur für sehr Erfahrene.`, true);
+    if (sh[4] > 0) note(`${km(sh[4])} schwerer Bergweg (T4, schwarz): ausgesetzt, Hände nötig, Trittsicherheit und Schwindelfreiheit erforderlich.`, true);
+    if (sh[3] > 0) note(`${km(sh[3])} mittelschwerer Bergweg (T3, rot): Trittsicherheit nötig, ausgesetzte Stellen möglich.`, true);
+    note('Schwierigkeitsgrade stammen aus OpenStreetMap und können fehlen oder falsch sein. Schnee, Nässe und Sperrungen sind nicht berücksichtigt. Prüfe Bergtouren zusätzlich mit Karte oder dem Tourenportal des Alpenvereins.');
+    host.append(notes);
+    bar('Schwierigkeit', ['1', '2', '3', '4', '5', '6', '0'], { 1: 'T1 Talweg', 2: 'T2 einfach (blau)', 3: 'T3 mittelschwer (rot)', 4: 'T4 schwer (schwarz)', 5: 'T5 alpin', 6: 'T6 alpin', 0: 'ohne Angabe' }, route.sacShare, 'sac-');
+  }
   bar('Untergrund', SURFACES, SURFACE_LABEL, route.surfaceShare, 'surf-');
   bar('Wegtyp', WAYS, WAY_LABEL, route.wayShare, 'way-');
 }
@@ -773,6 +808,7 @@ function renderComposition() {
 // ---------------------------------------------------------------- Rundtour
 
 let cands = [], candSel = -1, roundCtrl = null;
+let renderRoundChips = () => {};
 const DIRS = [['any', 'egal'], ['0', 'Norden'], ['45', 'Nordosten'], ['90', 'Osten'], ['135', 'Südosten'], ['180', 'Süden'], ['225', 'Südwesten'], ['270', 'Westen'], ['315', 'Nordwesten']];
 
 function clearCandidates() {
@@ -794,7 +830,8 @@ async function runProposals(kind) {
   const start = state.waypoints[0], end = state.waypoints[state.waypoints.length - 1];
   if (start.lat == null) return toast('Wähle zuerst einen Startpunkt.');
   const km = kind === 'round' ? state.round.km : parseFloat($('detourKm').value);
-  if (!(km >= 5 && km <= 300)) return toast('Gib eine Länge zwischen 5 und 300 km ein.');
+  const minKm = PROFILES[state.profile].foot ? 2 : 5;
+  if (!(km >= minKm && km <= 300)) return toast(`Gib eine Länge zwischen ${minKm} und 300 km ein.`);
   if (kind === 'detour' && (state.loop || end.lat == null)) return toast('Für einen Umweg brauchst du Start und Ziel, ohne „Hin und zurück“.');
   const from = { lat: start.lat, lon: start.lon }, to = kind === 'detour' ? { lat: end.lat, lon: end.lon, label: end.label } : null;
   const directDist = kind === 'detour' && route && state.waypoints.filter((w) => w.lat != null).length === 2 ? route.dist : 0;
@@ -880,7 +917,7 @@ function renderCandidates() {
       h('span', { class: 'cand-nums' },
         h('span', {}, h('b', { text: fmt(r.dist / 1000, 1) }), ' km'),
         h('span', {}, h('b', { text: fmt(r.ascent) }), ' hm'),
-        h('span', {}, h('b', { text: formatTime(r.dist / 1000 / state.speeds[state.profile]).replace(' h', '') }), ' h'),
+        h('span', {}, h('b', { text: formatTime(tourHours(r)).replace(' h', '') }), ' h'),
         h('span', {}, h('b', { text: fmt(unpaved) }), ' % unbefestigt')),
       c.windNote ? h('span', { class: 'cand-tag', text: c.windNote }) : null)));
   });
@@ -910,12 +947,13 @@ function initRound() {
   }
   const km = $('roundKm');
   km.value = state.round.km;
-  km.addEventListener('change', () => { const v = parseFloat(km.value); if (v >= 5 && v <= 300) { state.round.km = v; save(); renderChips(); } else km.value = state.round.km; });
-  const renderChips = () => {
-    $('kmChips').replaceChildren(...[30, 50, 80, 100].map((v) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(state.round.km === v), text: v + ' km',
-      onclick: () => { state.round.km = v; km.value = v; save(); renderChips(); } })));
+  km.addEventListener('change', () => { const v = parseFloat(km.value); if (v >= 2 && v <= 300) { state.round.km = v; save(); renderRoundChips(); } else km.value = state.round.km; });
+  renderRoundChips = () => {
+    $('roundKm').min = PROFILES[state.profile].foot ? 2 : 5;
+    $('kmChips').replaceChildren(...(PROFILES[state.profile].foot ? [5, 10, 15, 20] : [30, 50, 80, 100]).map((v) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(state.round.km === v), text: v + ' km',
+      onclick: () => { state.round.km = v; km.value = v; save(); renderRoundChips(); } })));
   };
-  renderChips();
+  renderRoundChips();
   const dir = $('roundDir');
   for (const [v, label] of DIRS) dir.append(h('option', { value: v, text: label, selected: v === state.round.dir }));
   dir.addEventListener('change', () => { state.round.dir = dir.value; save(); });
@@ -998,7 +1036,7 @@ async function updateWeather() {
     const samples = samplePoints(r);
     const fcs = await fetchForecast(samples, ctrl.signal);
     if (ctrl !== wxCtrl || r !== route) return;
-    const start = departUnix(), speed = state.speeds[state.profile];
+    const start = departUnix(), speed = tourSpeed(r);
     const a = analyze(r, samples, fcs, start, speed);
     if (!a) { chart.setWind(null); renderWindMap(null); return renderWeather(null, 'Für diesen Zeitpunkt gibt es keine Vorhersage. Wähle eine Abfahrt in den nächsten sieben Tagen.'); }
     const closed = state.loop || Math.hypot(r.lat[0] - r.lat[r.n - 1], r.lon[0] - r.lon[r.n - 1]) < 0.003;
@@ -1087,7 +1125,7 @@ function renderWeather(w, note) {
   if (a.rows.some((r) => r.code >= 95)) hint('Unterwegs sind Gewitter möglich.', { warn: true });
   if (a.gust >= 50) hint(`Kräftige Böen bis ${fmt(a.gust)} km/h.`, { warn: true });
   if (a.sunset && a.end > a.sunset - 900 && a.start < a.sunset) hint(`Sonnenuntergang um ${clock(a.sunset)} Uhr, Ankunft gegen ${clock(a.end)} Uhr. Nimm Licht mit.`, { warn: true });
-  else if (a.night) hint('Ein Teil der Fahrt liegt im Dunkeln. Nimm Licht mit.', { warn: true });
+  else if (a.night) hint('Ein Teil der Tour liegt im Dunkeln. Nimm Licht mit.', { warn: true });
 
   body.append(lead, facts);
   if (hints.children.length) body.append(hints);
@@ -1459,7 +1497,7 @@ function init() {
   });
   $('speedInput').addEventListener('change', () => {
     const v = parseFloat($('speedInput').value);
-    if (v >= 5 && v <= 60) { state.speeds[state.profile] = v; save(); renderTime(); scheduleWeather(); } else $('speedInput').value = state.speeds[state.profile];
+    if (v >= 2 && v <= 60) { state.speeds[state.profile] = v; save(); renderTime(); scheduleWeather(); } else $('speedInput').value = state.speeds[state.profile];
   });
   $('btnLocate').addEventListener('click', () => locate(null));
   $('btnGpx').addEventListener('click', downloadGpx);

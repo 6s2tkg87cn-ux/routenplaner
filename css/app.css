@@ -88,7 +88,7 @@ a { color: inherit; }
 .seg button { flex: 1; border: 0; background: none; border-radius: 6px; padding: 9px 6px; font-weight: 500; color: var(--ink-2); white-space: nowrap; min-width: 0; }
 .seg button:hover { color: var(--ink); }
 .seg button[aria-checked=true] { background: var(--ink); color: var(--panel); }
-.seg-profile button { font: 600 17px/1.1 var(--font-num); padding: 11px 6px; letter-spacing: .01em; }
+.seg-profile button { font: 600 16px/1.1 var(--font-num); padding: 11px 2px; letter-spacing: .01em; }
 .seg-small button { padding: 6px 6px; font-size: 13px; }
 .seg-small button[aria-checked=true] { background: var(--panel); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(18, 38, 43, .22); }
 @media (prefers-color-scheme: dark) { .seg-small button[aria-checked=true] { background: var(--ink-2); color: var(--panel); box-shadow: none; } }
@@ -241,6 +241,10 @@ a { color: inherit; }
 .surf-pflaster, .way-radweg { background: var(--cat-4); fill: var(--cat-4); }
 .way-hauptstrasse { background: var(--cat-5); fill: var(--cat-5); }
 .surf-unbekannt { background: var(--cat-0); fill: var(--cat-0); }
+/* Wander-Schwierigkeit in den Farben der Wegmarkierung: gelb, blau, rot, schwarz */
+.sac-1 { background: #e6b800; } .sac-2 { background: #2a78d6; } .sac-3 { background: #d03b3b; } .sac-4 { background: #1d1d1d; }
+.sac-5, .sac-6 { background: #5b1f7a; } .sac-0 { background: var(--cat-0); }
+@media (prefers-color-scheme: dark) { .sac-4 { background: #000; outline: 1px solid #777; } }
 .slope-0 { background: var(--slope-0); fill: var(--slope-0); }
 .slope-1 { background: var(--slope-1); fill: var(--slope-1); }
 .slope-2 { background: var(--slope-2); fill: var(--slope-2); }

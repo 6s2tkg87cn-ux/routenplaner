@@ -76,6 +76,7 @@ export function createProfileChart(host, { onHover, onSelect }) {
     const digits = xStep < 0.1 ? 2 : xStep < 1 ? 1 : 0;
     let first = true;
     for (let v = Math.ceil(km0 / xStep - 1e-9) * xStep; v <= km1 + 1e-6; v += xStep) {
+      if (Math.abs(v) < 1e-9) v = 0;
       const px = x(v * 1000);
       const t = el('text', { x: px, y: H - 4, 'text-anchor': px < m.l + 12 ? 'start' : 'middle' });
       t.textContent = fmt(v, digits) + (first ? ' km' : '');

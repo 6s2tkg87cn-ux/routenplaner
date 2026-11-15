@@ -6,6 +6,7 @@ export const PROFILES = {
   rennrad: { label: 'Rennrad', file: 'profiles/rennrad.brf', speed: 27 },
   gravel: { label: 'Gravel', file: 'profiles/gravel.brf', speed: 20 },
   alltag: { label: 'Alltag', file: 'profiles/alltag.brf', speed: 17 },
+  wandern: { label: 'Wandern', file: 'profiles/wandern.brf', speed: 4, foot: true },
 };
 
 export const DEFAULT_OPTIONS = {
@@ -15,6 +16,8 @@ export const DEFAULT_OPTIONS = {
     trails: false, preferUnpaved: true, wet: false, cycleRoutes: false },
   alltag: { traffic: 2, elevation: 'balanced', forest: 0, river: 0, town: 0, noMain: false, ferries: true,
     cycleRoutes: false },
+  wandern: { sac: 2, elevation: 'balanced', forest: 0, river: 0, town: 0, ferries: true,
+    hikingRoutes: true, paths: false, visibility: true, wet: false, ferrata: false },
 };
 
 const templates = {};
@@ -64,6 +67,21 @@ export function profileVars(profile, o) {
     v.allow_steps = false;
     v.allow_ferries = !!o.ferries;
     Object.assign(v, elevationVars(o.elevation));
+  } else if (profile === 'wandern') {
+    // Schwierigkeit nach SAC-Wanderskala: Grenze (härter ist gesperrt) und bevorzugter Grad
+    const sac = Math.max(1, Math.min(5, o.sac | 0));
+    v.SAC_scale_limit = [1, 2, 3, 4, 6][sac - 1];
+    v.SAC_scale_preferred = [1, 1, 2, 3, 3][sac - 1];
+    v.consider_elevation = o.elevation === 'flat';
+    v.consider_forest = o.forest >= 1;
+    v.consider_river = o.river >= 1;
+    v.consider_town = o.town >= 1;
+    v.iswet = o.wet ? 1 : 0;
+    v.hiking_routes_preference = o.hikingRoutes ? 0.6 : 0.1;
+    v.path_preference = o.paths ? 20 : 0;
+    v.allow_ferries = !!o.ferries;
+    v.kv_unknown = o.ferrata ? 1 : 0;
+    v.kv_visibility = o.visibility ? 2 : 0;
   } else {
     v.kv_traffic = pick([0, 1, 1.6, 2.5], o.traffic);
     v.kv_noise = pick([0, 0, 0.5, 1], o.traffic);
@@ -204,7 +222,16 @@ export function classifyTags(tagStr) {
   else if (hw === 'track') way = 'wirtschaftsweg';
   else if (/^(path|footway|steps|bridleway|pedestrian)$/.test(hw)) way = 'pfad';
   else way = 'nebenstrasse';
-  return { surface, way };
+  const SAC = { hiking: 1, 'T1-hiking': 1, yes: 1, mountain_hiking: 2, demanding_mountain_hiking: 3, alpine_hiking: 4, demanding_alpine_hiking: 5, difficult_alpine_hiking: 6 };
+  return { surface, way, sac: SAC[t.sac_scale] || 0, unknown: hw === 'unknown' };
+}
+
+/** Fahr- oder Gehzeit in Stunden. Wandern nach DIN 33466: 300 hm/h bergauf, 500 hm/h bergab, dazu die Strecke. */
+export function travelHours(route, profile, speed) {
+  const flat = route.dist / 1000 / speed;
+  if (!PROFILES[profile].foot) return flat;
+  const vert = route.ascent / 300 + route.descent / 500;
+  return Math.max(flat, vert) + Math.min(flat, vert) / 2;
 }
 
 export function parseRoute(geojson) {
@@ -259,21 +286,24 @@ export function parseRoute(geojson) {
         if (d <= 0) continue;
         const c = classifyTags(msgs[k][iTags]);
         const last = sections[sections.length - 1];
-        if (last && last.surface === c.surface && last.way === c.way) last.to = pos + d;
-        else sections.push({ from: pos, to: pos + d, surface: c.surface, way: c.way });
+        if (last && last.surface === c.surface && last.way === c.way && last.sac === c.sac && last.unknown === c.unknown) last.to = pos + d;
+        else sections.push({ from: pos, to: pos + d, surface: c.surface, way: c.way, sac: c.sac, unknown: c.unknown });
         pos += d;
       }
       // auf die tatsächliche Streckenlänge skalieren
       if (pos > 0) { const k = dist / pos; for (const s of sections) { s.from *= k; s.to *= k; } }
     }
   }
-  const surfaceShare = {}, wayShare = {};
+  const surfaceShare = {}, wayShare = {}, sacShare = {};
+  let unknownLen = 0;
   for (const s of sections) {
+    sacShare[s.sac] = (sacShare[s.sac] || 0) + (s.to - s.from);
+    if (s.unknown) unknownLen += s.to - s.from;
     surfaceShare[s.surface] = (surfaceShare[s.surface] || 0) + (s.to - s.from);
     wayShare[s.way] = (wayShare[s.way] || 0) + (s.to - s.from);
   }
 
-  return { lat, lon, ele, cum, n, dist, ascent, descent, minEle, maxEle, hasEle, sections, surfaceShare, wayShare };
+  return { lat, lon, ele, cum, n, dist, ascent, descent, minEle, maxEle, hasEle, sections, surfaceShare, wayShare, sacShare, unknownLen };
 }
 
 // Index des Streckenpunkts, der einer Position am nächsten liegt.
@@ -368,7 +398,7 @@ export function toGpx(route, name, plan) {
     '<gpx version="1.1" creator="Rueckenwind Routenplaner" xmlns="http://www.topografix.com/GPX/1/1">',
     ' <metadata><name>' + esc(name) + '</name>' + (plan ? '<desc>' + esc(PLAN_TAG + JSON.stringify(plan)) + '</desc>' : '') +
       '<time>' + new Date().toISOString() + '</time></metadata>',
-    ' <trk><name>' + esc(name) + '</name><type>cycling</type><trkseg>'];
+    ' <trk><name>' + esc(name) + '</name><type>' + (plan && plan.profile === 'wandern' ? 'hiking' : 'cycling') + '</type><trkseg>'];
   for (let i = 0; i < route.n; i++) {
     out.push('  <trkpt lat="' + route.lat[i].toFixed(6) + '" lon="' + route.lon[i].toFixed(6) + '">' +
       (route.hasEle ? '<ele>' + route.ele[i].toFixed(1) + '</ele>' : '') + '</trkpt>');

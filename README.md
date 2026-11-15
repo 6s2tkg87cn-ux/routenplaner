@@ -5,7 +5,8 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 ## Was die App kann
 
 - Route von A nach B mit beliebig vielen Zwischenzielen, per Suche oder Tippen auf die Karte
-- Drei Profile (Rennrad, Gravel, Alltag) mit Optionen für Autoverkehr, Höhenmeter, Wald, Flüsse, Ortschaften, Untergrund und mehr
+- Wandern mit Schwierigkeitsgrenze nach SAC-Wanderskala (T1 bis T6, mit den Farben des Alpenvereins), Gehzeit nach DIN 33466
+- Drei Radprofile (Rennrad, Gravel, Alltag) mit Optionen für Autoverkehr, Höhenmeter, Wald, Flüsse, Ortschaften, Untergrund und mehr
 - Sperrzonen, um bestimmte Straßen oder Gebiete zu meiden
 - Bis zu vier Routenvarianten
 - Höhenprofil mit Steigungsfarben, Untergrund und Wegtypen
@@ -39,6 +40,6 @@ Lokal starten: `python3 -m http.server` im Projektordner, dann `http://localhost
 
 ## Lizenzen der enthaltenen Teile
 
-- Routing-Profile: abgeleitet von den BRouter-Profilen `fastbike`, `trekking` und `gravel` (MIT-Lizenz, © Arndt Brenschede und Mitwirkende)
+- Routing-Profile: abgeleitet von den BRouter-Profilen `fastbike`, `trekking`, `gravel` und `hiking-mountain` (MIT-Lizenz, © Arndt Brenschede und Mitwirkende)
 - MapLibre GL JS: BSD-3-Clause
 - Barlow: SIL Open Font License 1.1

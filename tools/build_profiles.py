@@ -91,4 +91,21 @@ t = patch(t, "    multiply notcycleroutepenalty multiply noriverpenalty",
 t = patch(t, "    switch    highway=path                                      pathpenalty",
              "    switch    highway=path                                      ( max 1 multiply kv_path pathpenalty )")
 (out / "gravel.brf").write_text(t)
+# ---------------------------------------------------------------- Wandern
+t = (here / "hiking-mountain.brf").read_text()
+# Schwierigkeitsgrenze ist hart: zu schwere Wege sind gesperrt, nicht nur teuer
+t = patch(t, "assign   SAC_access_penalty       9000 ", "assign   SAC_access_penalty       100000 ")
+t = patch(t, "---context:way", """
+# --- App-Variablen (werden von der App gesetzt) ---
+assign kv_unknown    = 0     # 1 = Wege mit unbekanntem Typ erlauben (z. B. Klettersteige)
+assign kv_visibility = 0.0   # Aufschlag für schlecht erkennbare Wege
+
+---context:way""")
+t = patch(t, "  else add cost_of_unknown switch ismuddy 0.5 0.0",
+             "  else if highway=unknown then ( if kv_unknown then 4.0 else 100000 )\n  else add cost_of_unknown switch ismuddy 0.5 0.0")
+t = patch(t, """assign costfactor
+add town_penalty""", """assign costfactor
+add ( if trail_visibility=bad|horrible|no then kv_visibility else 0 )
+add town_penalty""")
+(out / "wandern.brf").write_text(t)
 print("ok")
