@@ -1287,7 +1287,7 @@ async function updatePois() {
         ev.stopPropagation();
         openMenu(q.lat, q.lon, h('div', { class: 'map-menu' },
           h('strong', { text: q.name }),
-          h('span', { class: 'menu-note', text: `${POI_CATS[q.cat].label}, bei km ${fmt(q.d / 1000, 1)}` }),
+          h('span', { class: 'menu-note', text: `${q.kind || POI_CATS[q.cat].label}, bei km ${fmt(q.d / 1000, 1)}` }),
           q.hours ? h('span', { class: 'menu-note', text: q.hours }) : null,
           h('button', { type: 'button', text: 'Als Wegpunkt einfügen', onclick: () => { closeMenu(); addVia(q.lat, q.lon); } })), 14);
       });

@@ -5,19 +5,24 @@ import { pointAt, nearestIndex } from './routing.js';
 export const POI_CATS = {
   wasser: { label: 'Trinkwasser', icon: '💧', filters: ['[amenity=drinking_water]', '[natural=spring][drinking_water=yes]'] },
   cafe: { label: 'Café und Bäcker', icon: '☕', filters: ['[amenity~"^(cafe|ice_cream)$"]', '[shop~"^(bakery|pastry)$"]'] },
-  essen: { label: 'Einkehr', icon: '🍽️', filters: ['[amenity~"^(restaurant|biergarten|pub|fast_food)$"]'] },
+  essen: { label: 'Einkehr', icon: '🍽️', filters: ['[amenity~"^(restaurant|biergarten|pub|fast_food)$"]', '[tourism=alpine_hut]'] },
+  schlafen: { label: 'Übernachtung', icon: '🛏️', filters: ['[tourism~"^(alpine_hut|wilderness_hut|hotel|guest_house|hostel|camp_site)$"]'] },
   laden: { label: 'Supermarkt', icon: '🛒', filters: ['[shop~"^(supermarket|convenience)$"]'] },
   rad: { label: 'Radladen', icon: '🔧', filters: ['[shop=bicycle]', '[amenity=bicycle_repair_station]'] },
 };
 
-function categoryOf(t) {
-  if (t.amenity === 'drinking_water' || t.natural === 'spring') return 'wasser';
-  if (t.amenity === 'cafe' || t.amenity === 'ice_cream' || t.shop === 'bakery' || t.shop === 'pastry') return 'cafe';
-  if (['restaurant', 'biergarten', 'pub', 'fast_food'].includes(t.amenity)) return 'essen';
-  if (t.shop === 'supermarket' || t.shop === 'convenience') return 'laden';
-  if (t.shop === 'bicycle' || t.amenity === 'bicycle_repair_station') return 'rad';
-  return null;
+// Ein Ort kann zu mehreren Kategorien gehören, z. B. eine Berghütte zu Einkehr und Übernachtung.
+function categoriesOf(t) {
+  const out = [];
+  if (t.amenity === 'drinking_water' || t.natural === 'spring') out.push('wasser');
+  if (t.amenity === 'cafe' || t.amenity === 'ice_cream' || t.shop === 'bakery' || t.shop === 'pastry') out.push('cafe');
+  if (['restaurant', 'biergarten', 'pub', 'fast_food'].includes(t.amenity) || t.tourism === 'alpine_hut') out.push('essen');
+  if (['alpine_hut', 'wilderness_hut', 'hotel', 'guest_house', 'hostel', 'camp_site'].includes(t.tourism)) out.push('schlafen');
+  if (t.shop === 'supermarket' || t.shop === 'convenience') out.push('laden');
+  if (t.shop === 'bicycle' || t.amenity === 'bicycle_repair_station') out.push('rad');
+  return out;
 }
+const KIND = { alpine_hut: 'Berghütte', wilderness_hut: 'Schutzhütte ohne Bewirtung', hotel: 'Hotel', guest_house: 'Pension', hostel: 'Hostel', camp_site: 'Campingplatz' };
 
 export class PoiError extends Error {}
 
@@ -106,17 +111,23 @@ export async function fetchPois(route, cats, signal) {
     const seen = new Set();
     for (const e of json.elements || []) {
       const lat = e.lat != null ? e.lat : e.center && e.center.lat, lon = e.lon != null ? e.lon : e.center && e.center.lon;
-      const t = e.tags || {}, cat = categoryOf(t);
-      if (lat == null || !cat || !found[cat]) continue;
+      const t = e.tags || {}, mine = categoriesOf(t).filter((c) => found[c]);
+      if (lat == null || !mine.length) continue;
       const i = nearestIndex(route, lat, lon);
       // höchstens 300 m neben der Strecke
       if (distToRoute(route, i, lat, lon) > 300) continue;
-      const key = cat + (t.name || '') + lat.toFixed(3) + lon.toFixed(3);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      found[cat].push({ lat, lon, cat, name: t.name || POI_CATS[cat].label, hours: t.opening_hours || '', d: route.cum[i] });
+      for (const cat of mine) {
+        const key = cat + (t.name || '') + lat.toFixed(3) + lon.toFixed(3);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        found[cat].push({ lat, lon, cat, name: t.name || KIND[t.tourism] || POI_CATS[cat].label, kind: KIND[t.tourism] || '',
+          hours: t.opening_hours || '', d: route.cum[i] });
+      }
     }
     Object.assign(store, found);
   }
-  return cats.flatMap((c) => store[c]).sort((a, b) => a.d - b.d);
+  // Gleicher Ort in zwei gewählten Kategorien: nur einmal anzeigen
+  const shown = new Set();
+  return cats.flatMap((c) => store[c]).filter((q) => { const k = q.name + q.lat.toFixed(4) + q.lon.toFixed(4); if (shown.has(k)) return false; shown.add(k); return true; })
+    .sort((a, b) => a.d - b.d);
 }
