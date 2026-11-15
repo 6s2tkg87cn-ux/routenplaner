@@ -8,6 +8,7 @@ export const POI_CATS = {
   essen: { label: 'Einkehr', icon: '🍽️', filters: ['[amenity~"^(restaurant|biergarten|pub|fast_food)$"]', '[tourism=alpine_hut]'] },
   schlafen: { label: 'Übernachtung', icon: '🛏️', filters: ['[tourism~"^(alpine_hut|wilderness_hut|hotel|guest_house|hostel|camp_site)$"]'] },
   laden: { label: 'Supermarkt', icon: '🛒', filters: ['[shop~"^(supermarket|convenience)$"]'] },
+  parken: { label: 'Parkplatz kostenlos', icon: '🅿️', filters: ['[amenity=parking][fee=no]', '[amenity=parking][!fee][access!~"^(private|customers|no|permit|delivery)$"]'] },
   rad: { label: 'Radladen', icon: '🔧', filters: ['[shop=bicycle]', '[amenity=bicycle_repair_station]'] },
 };
 
@@ -20,6 +21,8 @@ function categoriesOf(t) {
   if (['alpine_hut', 'wilderness_hut', 'hotel', 'guest_house', 'hostel', 'camp_site'].includes(t.tourism)) out.push('schlafen');
   if (t.shop === 'supermarket' || t.shop === 'convenience') out.push('laden');
   if (t.shop === 'bicycle' || t.amenity === 'bicycle_repair_station') out.push('rad');
+  // Parkplätze: ausdrücklich kostenlos oder ohne Angabe zur Gebühr; private und Kundenparkplätze nicht
+  if (t.amenity === 'parking' && (!t.fee || t.fee === 'no') && !/^(private|customers|no|permit|delivery)$/.test(t.access || '')) out.push('parken');
   return out;
 }
 const KIND = { alpine_hut: 'Berghütte', wilderness_hut: 'Schutzhütte ohne Bewirtung', hotel: 'Hotel', guest_house: 'Pension', hostel: 'Hostel', camp_site: 'Campingplatz' };
@@ -121,8 +124,10 @@ export async function fetchPois(route, cats, signal, radius = 300) {
         const key = cat + (t.name || '') + lat.toFixed(3) + lon.toFixed(3);
         if (seen.has(key)) continue;
         seen.add(key);
-        found[cat].push({ lat, lon, cat, name: t.name || KIND[t.tourism] || POI_CATS[cat].label, kind: KIND[t.tourism] || '',
-          hours: t.opening_hours || '', d: route.cum[i], off });
+        const parking = cat === 'parken';
+        found[cat].push({ lat, lon, cat, name: t.name || (parking ? 'Parkplatz' : KIND[t.tourism] || POI_CATS[cat].label),
+          kind: parking ? (t.fee === 'no' ? 'Kostenloser Parkplatz' : 'Parkplatz, Gebühr nicht angegeben') : KIND[t.tourism] || '',
+          unsure: parking && t.fee !== 'no', hours: t.opening_hours || '', d: route.cum[i], off });
       }
     }
     Object.assign(store.cats, found);
