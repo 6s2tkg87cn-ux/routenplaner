@@ -9,7 +9,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
-<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css">
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
@@ -31,16 +31,44 @@
 
       <section class="block">
         <div class="seg seg-profile" id="profileSeg" role="radiogroup" aria-label="Radtyp"></div>
+        <div class="seg seg-mode" id="modeSeg" role="radiogroup" aria-label="Art der Planung"></div>
       </section>
 
       <section class="block" aria-label="Wegpunkte">
         <ol id="wpList" class="wp-list"></ol>
-        <div class="wp-actions">
-          <button id="btnAddVia" class="ghost-btn" type="button">Zwischenziel hinzufügen</button>
-          <button id="btnLoop" class="ghost-btn" type="button">Zurück zum Start</button>
-          <button id="btnReverse" class="ghost-btn" type="button">Richtung umkehren</button>
+        <div id="routeExtras">
+          <div class="opt opt-toggle loop-row">
+            <label for="loopSwitch"><span class="opt-label">Hin und zurück</span><span class="opt-note">Die Route führt am Ende zum Start zurück. Mit weiteren Wegpunkten wird daraus eine Runde.</span></label>
+            <input type="checkbox" id="loopSwitch" class="switch">
+          </div>
+          <div class="wp-actions">
+            <button id="btnAddVia" class="ghost-btn" type="button">Wegpunkt hinzufügen</button>
+            <button id="btnReverse" class="ghost-btn" type="button">Richtung umkehren</button>
+          </div>
         </div>
         <p class="hint" id="mapHint">Tippe auf die Karte, um den Start zu setzen.</p>
+      </section>
+
+      <section class="block" id="roundBlock" hidden aria-label="Rundtour">
+        <div class="round-grid">
+          <label class="field-label" for="roundKm">Länge</label>
+          <div class="round-km">
+            <span class="speed-field"><input id="roundKm" type="number" inputmode="decimal" min="5" max="300" step="1"> km</span>
+            <div id="kmChips" class="chips"></div>
+          </div>
+          <label class="field-label" for="roundDir">Richtung</label>
+          <select id="roundDir" class="select"></select>
+          <span class="field-label" id="climbLabel">Höhenmeter</span>
+          <div class="seg seg-small" id="climbSeg" role="radiogroup" aria-labelledby="climbLabel"></div>
+        </div>
+        <button id="btnRound" class="primary-btn wide" type="button">Rundtour vorschlagen</button>
+        <p class="hint" id="roundStatus" hidden></p>
+        <p class="hint">Radtyp und Optionen unten gelten auch für die Rundtour, zum Beispiel viel Wald oder kaum Autoverkehr.</p>
+        <div id="candWrap" hidden>
+          <h2 class="cand-head">Vorschläge</h2>
+          <ul id="candList" class="cand-list"></ul>
+          <button id="btnEditWp" class="link-btn" type="button">Wegpunkte dieser Runde bearbeiten</button>
+        </div>
       </section>
 
       <details class="block fold" id="optFold" open>
@@ -126,7 +154,7 @@
   </div>
 </section>
 
-<script src="vendor/leaflet/leaflet.js"></script>
+<script src="vendor/maplibre/maplibre-gl.js"></script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

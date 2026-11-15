@@ -1,9 +1,10 @@
-/* global L */
+/* global maplibregl */
 import {
   PROFILES, DEFAULT_OPTIONS, fetchRoute, RouteError, nearestIndex, toGpx,
   SURFACES, SURFACE_LABEL, WAYS, WAY_LABEL,
 } from './routing.js';
 import { createProfileChart } from './elevation.js';
+import { generateRoundTrips } from './roundtrip.js';
 
 const $ = (id) => document.getElementById(id);
 const h = (tag, props = {}, ...kids) => {
@@ -30,7 +31,11 @@ const state = {
   profile: 'rennrad',
   options: structuredClone(DEFAULT_OPTIONS),
   speeds: Object.fromEntries(Object.entries(PROFILES).map(([k, p]) => [k, p.speed])),
-  layer: 'radkarte',
+  layer: 'standard',
+  layerV: 2,
+  mode: 'route',
+  loop: false,
+  round: { km: 50, dir: 'any', climb: 'any' },
   waypoints: [emptyWp(), emptyWp()],
   nogos: [],
   favorites: [],
@@ -47,7 +52,10 @@ function load() {
     if (PROFILES[s.profile]) state.profile = s.profile;
     for (const p in DEFAULT_OPTIONS) state.options[p] = { ...DEFAULT_OPTIONS[p], ...(s.options && s.options[p]) };
     for (const p in PROFILES) if (s.speeds && s.speeds[p] > 0) state.speeds[p] = s.speeds[p];
-    if (s.layer) state.layer = s.layer;
+    if (s.layer && s.layerV === 2) state.layer = s.layer;
+    if (s.mode === 'round') state.mode = 'round';
+    state.loop = !!s.loop;
+    if (s.round) state.round = { ...state.round, ...s.round };
     if (Array.isArray(s.waypoints) && s.waypoints.length >= 2) state.waypoints = s.waypoints.map((w) => ({ ...emptyWp(), ...w, id: uid() }));
     if (Array.isArray(s.nogos)) state.nogos = s.nogos.map((n) => ({ ...n, id: uid() }));
     if (Array.isArray(s.favorites)) state.favorites = s.favorites;
@@ -61,56 +69,114 @@ function save() {
 
 // ---------------------------------------------------------------- Karte
 
+const OSM = '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>';
+const raster = (tiles, attribution, maxzoom) => ({
+  version: 8,
+  sources: { base: { type: 'raster', tiles, tileSize: 256, attribution, maxzoom } },
+  layers: [{ id: 'base', type: 'raster', source: 'base' }],
+});
 const LAYERS = {
-  radkarte: { label: 'Radkarte', url: 'https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png', sub: 'abc', max: 20,
-    attr: '<a href="https://www.cyclosm.org">CyclOSM</a> | © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' },
-  schlicht: { label: 'Schlicht', url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', sub: 'abcd', max: 20,
-    darkUrl: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    attr: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, © <a href="https://carto.com/attributions">CARTO</a>' },
-  topo: { label: 'Topo', url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', sub: 'abc', max: 17,
-    attr: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>, SRTM | <a href="https://opentopomap.org">OpenTopoMap</a>' },
-  satellit: { label: 'Satellit', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', sub: '', max: 19,
-    attr: 'Bilder © Esri, Maxar, Earthstar Geographics' },
+  standard: { label: 'Standard', style: 'https://tiles.openfreemap.org/styles/liberty' },
+  radkarte: { label: 'Radkarte', style: raster(['a', 'b', 'c'].map((s) => `https://${s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png`),
+    '<a href="https://www.cyclosm.org" target="_blank" rel="noopener">CyclOSM</a> | ' + OSM, 19) },
+  topo: { label: 'Topo', style: raster(['a', 'b', 'c'].map((s) => `https://${s}.tile.opentopomap.org/{z}/{x}/{y}.png`),
+    OSM + ', SRTM | <a href="https://opentopomap.org" target="_blank" rel="noopener">OpenTopoMap</a>', 17) },
+  satellit: { label: 'Satellit', style: raster(['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+    'Bilder © Esri, Maxar, Earthstar Geographics', 19) },
 };
 
-let map, tileLayer, routeGroup, markerGroup, nogoGroup, hoverMarker, chart;
-const dark = window.matchMedia('(prefers-color-scheme: dark)');
+let map, chart, hoverMarker = null, popup = null;
+let markers = [], nogoMarkers = [];
+const EMPTY = { type: 'FeatureCollection', features: [] };
+const overlay = { route: EMPTY, cands: EMPTY, nogo: EMPTY };
 
 function setLayer(key) {
-  if (!LAYERS[key]) key = 'radkarte';
+  if (!LAYERS[key]) key = 'standard';
   state.layer = key;
-  const def = LAYERS[key];
-  if (tileLayer) tileLayer.remove();
-  tileLayer = L.tileLayer(dark.matches && def.darkUrl ? def.darkUrl : def.url, {
-    subdomains: def.sub || 'abc', maxZoom: 20, maxNativeZoom: def.max, attribution: def.attr,
-  }).addTo(map);
+  map.setStyle(LAYERS[key].style, { diff: false });
   for (const b of $('layerMenu').children) b.setAttribute('aria-checked', b.dataset.key === key ? 'true' : 'false');
   save();
 }
 
+// Eigene Ebenen (Route, Vorschläge, Sperrzonen) liegen über jeder Basiskarte und werden
+// nach jedem Stilwechsel neu angelegt.
+function addOverlays() {
+  if (map.getSource('route')) return;
+  for (const k of ['nogo', 'cands', 'route']) map.addSource(k, { type: 'geojson', data: overlay[k] });
+  const round = { 'line-cap': 'round', 'line-join': 'round' };
+  map.addLayer({ id: 'nogo-fill', type: 'fill', source: 'nogo', paint: { 'fill-color': '#b3261e', 'fill-opacity': 0.14 } });
+  map.addLayer({ id: 'nogo-line', type: 'line', source: 'nogo', paint: { 'line-color': '#b3261e', 'line-width': 2, 'line-dasharray': [3, 2.5] } });
+  map.addLayer({ id: 'cand-casing', type: 'line', source: 'cands', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9 } });
+  map.addLayer({ id: 'cand-line', type: 'line', source: 'cands', layout: round, paint: { 'line-color': '#47595d', 'line-width': 3.5 } });
+  map.addLayer({ id: 'cand-hit', type: 'line', source: 'cands', paint: { 'line-color': '#000', 'line-width': 24, 'line-opacity': 0.01 } });
+  map.addLayer({ id: 'route-casing', type: 'line', source: 'route', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 9, 'line-opacity': 0.95 } });
+  map.addLayer({ id: 'route-line', type: 'line', source: 'route', layout: round, paint: { 'line-color': '#d0146a', 'line-width': 5 } });
+  map.addLayer({ id: 'route-hit', type: 'line', source: 'route', paint: { 'line-color': '#000', 'line-width': 24, 'line-opacity': 0.01 } });
+}
+function setOverlay(key, data) {
+  overlay[key] = data;
+  const src = map && map.getSource(key);
+  if (src) src.setData(data);
+}
+const lineFeature = (r, props = {}) => {
+  const coordinates = [];
+  for (let i = 0; i < r.n; i++) coordinates.push([r.lon[i], r.lat[i]]);
+  return { type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates } };
+};
+function circleFeature(n) {
+  const ring = [];
+  const dLat = n.radius / 111320, dLon = dLat / Math.cos(n.lat * Math.PI / 180);
+  for (let i = 0; i <= 64; i++) { const a = (i / 64) * 2 * Math.PI; ring.push([n.lon + dLon * Math.cos(a), n.lat + dLat * Math.sin(a)]); }
+  return { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [ring] } };
+}
+
 function initMap() {
-  map = L.map('map', { zoomControl: false, attributionControl: true }).setView([state.view.lat, state.view.lon], state.view.zoom);
-  map.attributionControl.setPrefix(false);
-  L.control.zoom({ position: 'topright' }).addTo(map);
-  nogoGroup = L.layerGroup().addTo(map);
-  routeGroup = L.layerGroup().addTo(map);
-  markerGroup = L.layerGroup().addTo(map);
+  map = new maplibregl.Map({
+    container: 'map', style: LAYERS[state.layer] ? LAYERS[state.layer].style : LAYERS.standard.style,
+    center: [state.view.lon, state.view.lat], zoom: state.view.zoom,
+    attributionControl: false, dragRotate: false, pitchWithRotate: false, maxPitch: 0,
+  });
+  map.touchZoomRotate.disableRotation();
+  map.keyboard.disableRotation();
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+  map.addControl(new maplibregl.AttributionControl({ compact: false }), 'bottom-right');
+  map.on('style.load', addOverlays);
 
   const menu = $('layerMenu');
   for (const key in LAYERS) {
     menu.append(h('button', { type: 'button', role: 'menuitemradio', 'data-key': key, text: LAYERS[key].label,
-      onclick: () => { setLayer(key); toggleLayerMenu(false); } }));
+      'aria-checked': String(key === state.layer), onclick: () => { setLayer(key); toggleLayerMenu(false); } }));
   }
   $('btnLayers').addEventListener('click', () => toggleLayerMenu($('layerMenu').hidden));
-  setLayer(state.layer);
-  dark.addEventListener('change', () => setLayer(state.layer));
 
   map.on('moveend', () => {
     const c = map.getCenter();
     state.view = { lat: c.lat, lon: c.lng, zoom: map.getZoom() };
     save();
   });
-  map.on('click', onMapClick);
+  map.on('click', (ev) => {
+    toggleLayerMenu(false);
+    const box = [[ev.point.x - 9, ev.point.y - 9], [ev.point.x + 9, ev.point.y + 9]];
+    const layers = ['route-hit', 'cand-hit'].filter((id) => map.getLayer(id));
+    const hits = layers.length ? map.queryRenderedFeatures(box, { layers }) : [];
+    const cand = hits.find((f) => f.layer.id === 'cand-hit');
+    if (hits.some((f) => f.layer.id === 'route-hit')) {
+      if (state.mode === 'route') addVia(ev.lngLat.lat, ev.lngLat.lng);
+      return;
+    }
+    if (cand) return applyCandidate(cand.properties.i);
+    onMapClick(ev.lngLat.lat, ev.lngLat.lng);
+  });
+  map.on('mousemove', 'route-hit', (ev) => {
+    if (!route) return;
+    map.getCanvas().style.cursor = state.mode === 'route' ? 'copy' : '';
+    const i = nearestIndex(route, ev.lngLat.lat, ev.lngLat.lng);
+    setHover(route.cum[i], { lat: route.lat[i], lon: route.lon[i] });
+    chart.setCursor(route.cum[i]);
+  });
+  map.on('mouseleave', 'route-hit', () => { map.getCanvas().style.cursor = ''; setHover(null); chart.setCursor(null); });
+  map.on('mouseenter', 'cand-hit', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'cand-hit', () => { map.getCanvas().style.cursor = ''; });
 }
 
 function toggleLayerMenu(open) {
@@ -120,32 +186,52 @@ function toggleLayerMenu(open) {
 
 // Freie Kartenfläche neben Seitenleiste, Ergebnisleiste oder Bottom-Sheet
 function fitPadding() {
-  if (isMobile()) return { paddingTopLeft: [30, 30], paddingBottomRight: [30, $('panel').offsetHeight + 20] };
+  if (isMobile()) return { top: 70, left: 40, right: 40, bottom: $('panel').offsetHeight + 30 };
   const dockH = $('dock').hidden ? 0 : $('dock').offsetHeight;
-  return { paddingTopLeft: [40, 40], paddingBottomRight: [60, dockH + 40] };
+  return { top: 50, left: 70, right: 70, bottom: dockH + 60 };
+}
+function fitRoute(r) {
+  let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+  for (let i = 0; i < r.n; i++) { w = Math.min(w, r.lon[i]); e = Math.max(e, r.lon[i]); s = Math.min(s, r.lat[i]); n = Math.max(n, r.lat[i]); }
+  map.resize();
+  map.fitBounds([[w, s], [e, n]], { padding: fitPadding(), duration: 700, maxZoom: 16 });
 }
 
-function onMapClick(ev) {
-  toggleLayerMenu(false);
-  const { lat, lng } = ev.latlng;
+function openMenu(lat, lon, box, offset = 4) {
+  closeMenu();
+  popup = new maplibregl.Popup({ closeButton: false, className: 'menu-popup', offset, maxWidth: '260px' })
+    .setLngLat([lon, lat]).setDOMContent(box).addTo(map);
+}
+function closeMenu() { if (popup) { popup.remove(); popup = null; } }
+
+function onMapClick(lat, lng) {
+  if (popup) return closeMenu();
+  const last = state.waypoints.length - 1;
   const filled = state.waypoints.filter((w) => w.lat != null).length;
   if (state.waypoints[0].lat == null) return setWaypoint(0, lat, lng, null);
-  if (filled === 1 && state.waypoints[state.waypoints.length - 1].lat == null) return setWaypoint(state.waypoints.length - 1, lat, lng, null);
-
-  const box = h('div', { class: 'map-menu' },
-    h('button', { type: 'button', text: 'Als Start', onclick: () => { map.closePopup(); setWaypoint(0, lat, lng, null); } }),
-    h('button', { type: 'button', text: 'Als Zwischenziel', onclick: () => { map.closePopup(); addVia(lat, lng); } }),
-    h('button', { type: 'button', text: 'Als Ziel', onclick: () => { map.closePopup(); setWaypoint(state.waypoints.length - 1, lat, lng, null); } }),
-    h('button', { type: 'button', class: 'danger', text: 'Hier sperren', onclick: () => { map.closePopup(); addNogo(lat, lng); } }));
-  L.popup({ closeButton: false, className: 'menu-popup', offset: [0, -2] }).setLatLng(ev.latlng).setContent(box).openOn(map);
+  const item = (text, fn, cls) => h('button', { type: 'button', class: cls, text, onclick: () => { closeMenu(); fn(); } });
+  if (state.mode === 'round') {
+    return openMenu(lat, lng, h('div', { class: 'map-menu' },
+      item('Als Start', () => setWaypoint(0, lat, lng, null)),
+      item('Hier sperren', () => addNogo(lat, lng), 'danger')));
+  }
+  if (filled === 1 && state.waypoints[last].lat == null) return setWaypoint(last, lat, lng, null);
+  openMenu(lat, lng, h('div', { class: 'map-menu' },
+    item('Als Start', () => setWaypoint(0, lat, lng, null)),
+    item(state.loop ? 'Als Wegpunkt' : 'Als Zwischenziel', () => addVia(lat, lng)),
+    state.loop ? null : item('Als Ziel', () => setWaypoint(state.waypoints.length - 1, lat, lng, null)),
+    item('Hier sperren', () => addNogo(lat, lng), 'danger')));
 }
 
 // ---------------------------------------------------------------- Wegpunkte
 
-const wpName = (i) => (i === 0 ? 'Start' : i === state.waypoints.length - 1 ? 'Ziel' : 'Zwischenziel ' + i);
-const wpBadge = (i) => (i === 0 ? 'A' : i === state.waypoints.length - 1 ? 'B' : String(i));
+const isEnd = (i) => !state.loop && i === state.waypoints.length - 1;
+const wpName = (i) => (i === 0 ? 'Start' : isEnd(i) ? 'Ziel' : (state.loop ? 'Wegpunkt ' : 'Zwischenziel ') + i);
+const wpBadge = (i) => (i === 0 ? 'A' : isEnd(i) ? 'B' : String(i));
 
 async function setWaypoint(index, lat, lon, label) {
+  // Neuer Start im Rundtour-Modus: alte Wegpunkte gehören zur vorherigen Runde und entfallen
+  if (state.mode === 'round' && index === 0) { state.waypoints = [state.waypoints[0], emptyWp()]; state.loop = false; renderLoop(); }
   const w = state.waypoints[index];
   w.lat = lat; w.lon = lon;
   w.label = label || fmt(lat, 5) + ', ' + fmt(lon, 5);
@@ -158,14 +244,24 @@ async function setWaypoint(index, lat, lon, label) {
 }
 
 function addVia(lat, lon) {
-  // Zwischenziel dort einfügen, wo es entlang der aktuellen Route liegt
-  let at = state.waypoints.length - 1;
+  // Wegpunkt dort einfügen, wo er entlang der aktuellen Route liegt
+  const maxAt = state.loop ? state.waypoints.length : state.waypoints.length - 1;
+  let at = maxAt;
   if (route) {
     const k = nearestIndex(route, lat, lon);
     at = 1;
-    for (let i = 1; i < state.waypoints.length - 1; i++) {
+    let from = 0;
+    for (let i = 1; i < maxAt; i++) {
       const w = state.waypoints[i];
-      if (w.lat != null && nearestIndex(route, w.lat, w.lon) <= k) at = i + 1;
+      if (w.lat == null) continue;
+      // Wegpunkte der Reihe nach entlang der Route suchen (wichtig bei Hin- und Rückweg auf derselben Straße)
+      let best = from, bestD = Infinity;
+      for (let j = from; j < route.n; j++) {
+        const dx = (route.lon[j] - w.lon) * Math.cos(w.lat * Math.PI / 180), dy = route.lat[j] - w.lat, d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = j; }
+      }
+      from = best;
+      if (best <= k) at = i + 1;
     }
   }
   state.waypoints.splice(at, 0, emptyWp());
@@ -194,27 +290,29 @@ function renderWaypoints() {
   const list = $('wpList');
   list.replaceChildren();
   state.waypoints.forEach((w, i) => {
+    if (state.mode === 'round' && i > 0) return;
     const input = h('input', { class: 'wp-input', type: 'text', autocomplete: 'off', spellcheck: 'false',
       placeholder: wpName(i) + ' suchen oder auf Karte tippen', 'aria-label': wpName(i) });
     input.value = w.label;
     const drop = h('div', { class: 'ac', hidden: true });
     attachAutocomplete(input, drop, i);
     const set = w.lat != null;
-    const li = h('li', { class: 'wp' + (i === 0 ? ' wp-start' : i === state.waypoints.length - 1 ? ' wp-end' : '') },
+    const li = h('li', { class: 'wp' + (i === 0 ? ' wp-start' : isEnd(i) ? ' wp-end' : '') },
       h('span', { class: 'wp-badge', text: wpBadge(i), 'aria-hidden': 'true' }),
       h('div', { class: 'wp-field' }, input, drop),
       set ? h('button', { class: 'icon-btn' + (isFavorite(w) ? ' on' : ''), type: 'button',
         title: isFavorite(w) ? 'Favorit entfernen' : 'Als Favorit speichern', 'aria-label': 'Favorit', 'aria-pressed': String(isFavorite(w)),
         onclick: () => toggleFavorite(w) }, icon('star')) : null,
-      (set || state.waypoints.length > 2) ? h('button', { class: 'icon-btn', type: 'button', title: 'Entfernen',
+      (state.mode === 'route' && (set || state.waypoints.length > 2)) ? h('button', { class: 'icon-btn', type: 'button', title: 'Entfernen',
         'aria-label': wpName(i) + ' entfernen', onclick: () => removeWaypoint(i) }, icon('x')) : null);
     list.append(li);
   });
   const filled = state.waypoints.filter((w) => w.lat != null).length;
-  $('mapHint').textContent = filled === 0 ? 'Tippe auf die Karte, um den Start zu setzen.'
-    : filled === 1 ? 'Tippe auf die Karte, um das Ziel zu setzen.'
-      : 'Tippe auf die Route, um ein Zwischenziel einzufügen. Punkte lassen sich verschieben.';
-  $('btnLoop').disabled = state.waypoints[0].lat == null;
+  $('mapHint').textContent = state.mode === 'round'
+    ? (filled === 0 ? 'Wähle den Start: suchen, „Mein Standort“ oder auf die Karte tippen.' : 'Der Start lässt sich auf der Karte verschieben.')
+    : filled === 0 ? 'Tippe auf die Karte, um den Start zu setzen.'
+      : filled === 1 ? (state.loop ? 'Tippe auf die Karte, um den Wendepunkt zu setzen.' : 'Tippe auf die Karte, um das Ziel zu setzen.')
+        : 'Tippe auf die Route, um einen Wegpunkt einzufügen. Punkte lassen sich verschieben.';
   $('btnReverse').disabled = filled < 2;
   renderMarkers();
 }
@@ -232,22 +330,23 @@ function icon(name) {
 }
 
 function renderMarkers() {
-  markerGroup.clearLayers();
+  markers.forEach((m) => m.remove());
+  markers = [];
   state.waypoints.forEach((w, i) => {
     if (w.lat == null) return;
-    const kind = i === 0 ? 'start' : i === state.waypoints.length - 1 ? 'end' : 'via';
-    const m = L.marker([w.lat, w.lon], {
-      draggable: true, autoPan: true, title: wpName(i), zIndexOffset: kind === 'via' ? 500 : 800,
-      icon: L.divIcon({ className: '', html: `<div class="pin pin-${kind}">${wpBadge(i)}</div>`, iconSize: [30, 30], iconAnchor: [15, 15] }),
-    });
-    m.on('dragend', () => { const p = m.getLatLng(); setWaypoint(state.waypoints.indexOf(w), p.lat, p.lng, null); });
-    m.on('click', () => {
-      const box = h('div', { class: 'map-menu' },
+    const kind = i === 0 ? 'start' : isEnd(i) ? 'end' : 'via';
+    const elm = h('div', { class: 'pin pin-' + kind, text: wpBadge(i), title: wpName(i) });
+    const m = new maplibregl.Marker({ element: elm, draggable: true }).setLngLat([w.lon, w.lat]).addTo(map);
+    m.on('dragend', () => { const p = m.getLngLat(); setWaypoint(state.waypoints.indexOf(w), p.lat, p.lng, null); });
+    elm.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const idx = state.waypoints.indexOf(w);
+      if (state.mode === 'round' && idx === 0) return;
+      openMenu(w.lat, w.lon, h('div', { class: 'map-menu' },
         h('strong', { text: w.label }),
-        h('button', { type: 'button', class: 'danger', text: 'Entfernen', onclick: () => { map.closePopup(); removeWaypoint(state.waypoints.indexOf(w)); } }));
-      L.popup({ closeButton: false, className: 'menu-popup', offset: [0, -12] }).setLatLng(m.getLatLng()).setContent(box).openOn(map);
+        h('button', { type: 'button', class: 'danger', text: 'Entfernen', onclick: () => { closeMenu(); removeWaypoint(state.waypoints.indexOf(w)); } })), 18);
     });
-    markerGroup.addLayer(m);
+    markers.push(m);
   });
 }
 
@@ -351,9 +450,9 @@ function locate(index) {
   toast('Standort wird bestimmt …');
   navigator.geolocation.getCurrentPosition((pos) => {
     const { latitude, longitude } = pos.coords;
-    if (index == null) { map.setView([latitude, longitude], Math.max(map.getZoom(), 14)); hideToast(); return; }
+    if (index == null) { map.easeTo({ center: [longitude, latitude], zoom: Math.max(map.getZoom(), 14) }); hideToast(); return; }
     hideToast();
-    if (state.waypoints.filter((w) => w.lat != null).length === 0) map.setView([latitude, longitude], Math.max(map.getZoom(), 14));
+    if (state.mode === 'round' || state.waypoints.filter((w) => w.lat != null).length === 0) map.easeTo({ center: [longitude, latitude], zoom: Math.max(map.getZoom(), 13) });
     else fitNext = true;
     setWaypoint(index, latitude, longitude, null);
   }, () => toast('Der Standort ist nicht verfügbar. Erlaube den Zugriff in den Browser-Einstellungen.'), { enableHighAccuracy: true, timeout: 10000 });
@@ -369,23 +468,26 @@ function addNogo(lat, lon) {
 }
 
 function renderNogos() {
-  nogoGroup.clearLayers();
+  nogoMarkers.forEach((m) => m.remove());
+  nogoMarkers = [];
   const list = $('nogoList');
   list.replaceChildren();
   $('nogoBlock').hidden = state.nogos.length === 0;
+  const draw = () => setOverlay('nogo', { type: 'FeatureCollection', features: state.nogos.map(circleFeature) });
+  draw();
   state.nogos.forEach((n, i) => {
-    const circle = L.circle([n.lat, n.lon], { radius: n.radius, className: 'nogo-circle', interactive: false });
-    const m = L.marker([n.lat, n.lon], { draggable: true, title: 'Sperrzone ' + (i + 1),
-      icon: L.divIcon({ className: '', html: '<div class="pin pin-nogo"></div>', iconSize: [22, 22], iconAnchor: [11, 11] }) });
-    m.on('drag', () => circle.setLatLng(m.getLatLng()));
-    m.on('dragend', () => { const p = m.getLatLng(); n.lat = p.lat; n.lon = p.lng; changed(); });
-    nogoGroup.addLayer(circle).addLayer(m);
+    const m = new maplibregl.Marker({ element: h('div', { class: 'pin pin-nogo', title: 'Sperrzone ' + (i + 1) }), draggable: true })
+      .setLngLat([n.lon, n.lat]).addTo(map);
+    m.on('drag', () => { const p = m.getLngLat(); n.lat = p.lat; n.lon = p.lng; draw(); });
+    m.on('dragend', () => changed());
+    m.getElement().addEventListener('click', (ev) => ev.stopPropagation());
+    nogoMarkers.push(m);
 
     const sel = h('select', { 'aria-label': 'Radius der Sperrzone ' + (i + 1),
-      onchange: () => { n.radius = +sel.value; circle.setRadius(n.radius); changed(); } });
+      onchange: () => { n.radius = +sel.value; draw(); changed(); } });
     for (const r of [50, 100, 200, 500, 1000, 2000]) sel.append(h('option', { value: r, text: r < 1000 ? r + ' m' : r / 1000 + ' km', selected: r === n.radius }));
     list.append(h('li', {},
-      h('button', { type: 'button', class: 'nogo-name', text: 'Sperrzone ' + (i + 1), title: 'Auf der Karte zeigen', onclick: () => map.setView([n.lat, n.lon], Math.max(map.getZoom(), 14)) }),
+      h('button', { type: 'button', class: 'nogo-name', text: 'Sperrzone ' + (i + 1), title: 'Auf der Karte zeigen', onclick: () => map.easeTo({ center: [n.lon, n.lat], zoom: Math.max(map.getZoom(), 14) }) }),
       h('label', { class: 'nogo-radius' }, 'Radius ', sel),
       h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Sperrzone ' + (i + 1) + ' entfernen', title: 'Entfernen',
         onclick: () => { state.nogos.splice(i, 1); renderNogos(); changed(); } }, icon('x'))));
@@ -455,6 +557,7 @@ let fitNext = true, routeCtrl = null, routeTimer = 0;
 // Nach jeder Änderung: speichern und Route neu berechnen
 function changed({ keepAlt = false } = {}) {
   if (!keepAlt) alt = 0;
+  clearCandidates();
   save();
   clearTimeout(routeTimer);
   routeTimer = setTimeout(calcRoute, 120);
@@ -465,6 +568,7 @@ async function calcRoute() {
   if (routeCtrl) routeCtrl.abort();
   const distinct = pts.some((p) => Math.abs(p.lat - pts[0].lat) > 1e-5 || Math.abs(p.lon - pts[0].lon) > 1e-5);
   if (pts.length < 2 || !distinct) { route = null; $('busy').hidden = true; showRoute(); return; }
+  if (state.loop) pts.push(pts[0]);
   routeCtrl = new AbortController();
   const ctrl = routeCtrl;
   $('busy').hidden = false;
@@ -497,23 +601,13 @@ function formatTime(hours) {
 }
 
 function showRoute() {
-  routeGroup.clearLayers();
-  hoverMarker = null;
+  setHover(null);
   const has = !!route;
   $('dock').hidden = !has;
   $('tourBlock').hidden = !has;
   document.body.classList.toggle('has-route', has);
+  setOverlay('route', has ? { type: 'FeatureCollection', features: [lineFeature(route)] } : EMPTY);
   if (!has) { chart.setRoute(null); placeDock(); return; }
-
-  const latlngs = [];
-  for (let i = 0; i < route.n; i++) latlngs.push([route.lat[i], route.lon[i]]);
-  L.polyline(latlngs, { className: 'route-casing', interactive: false }).addTo(routeGroup);
-  const line = L.polyline(latlngs, { className: 'route-line' }).addTo(routeGroup);
-  // breite unsichtbare Linie als Treffer-Fläche
-  const hit = L.polyline(latlngs, { className: 'route-hit', weight: 22, opacity: 0 }).addTo(routeGroup);
-  hit.on('click', (ev) => { L.DomEvent.stopPropagation(ev); addVia(ev.latlng.lat, ev.latlng.lng); });
-  hit.on('mousemove', (ev) => { const i = nearestIndex(route, ev.latlng.lat, ev.latlng.lng); setHover(route.cum[i], { lat: route.lat[i], lon: route.lon[i] }); chart.setCursor(route.cum[i]); });
-  hit.on('mouseout', () => { setHover(null); chart.setCursor(null); });
 
   $('stDist').innerHTML = `${fmt(route.dist / 1000, route.dist < 100000 ? 1 : 0)}<small> km</small>`;
   $('stUp').innerHTML = route.hasEle ? `${fmt(route.ascent)}<small> m</small>` : '–';
@@ -528,10 +622,10 @@ function showRoute() {
   if (!state.tourName) $('tourName').placeholder = defaultTourName();
   if (fitNext) {
     fitNext = false;
-    const mobile = isMobile();
-    if (mobile) setSheet('peek');
+    const mobile = isMobile(), r = route;
+    if (mobile && state.mode === 'route') setSheet('peek');
     // mobil erst nach dem Einfahren des Sheets einpassen
-    setTimeout(() => { map.invalidateSize(); map.fitBounds(line.getBounds(), fitPadding()); }, mobile ? 260 : 0);
+    setTimeout(() => fitRoute(r), mobile ? 260 : 30);
   }
 }
 
@@ -542,8 +636,8 @@ function renderTime() {
 
 function setHover(d, p) {
   if (d == null || !p) { if (hoverMarker) { hoverMarker.remove(); hoverMarker = null; } return; }
-  if (!hoverMarker) hoverMarker = L.circleMarker([p.lat, p.lon], { radius: 7, className: 'hover-dot', interactive: false }).addTo(routeGroup);
-  else hoverMarker.setLatLng([p.lat, p.lon]);
+  if (!hoverMarker) hoverMarker = new maplibregl.Marker({ element: h('div', { class: 'hover-dot' }) }).setLngLat([p.lon, p.lat]).addTo(map);
+  else hoverMarker.setLngLat([p.lon, p.lat]);
 }
 
 function renderAlt() {
@@ -577,15 +671,161 @@ function renderComposition() {
   bar('Wegtyp', WAYS, WAY_LABEL, route.wayShare, 'way-');
 }
 
+// ---------------------------------------------------------------- Rundtour
+
+let cands = [], candSel = -1, roundCtrl = null;
+const DIRS = [['any', 'egal'], ['0', 'Norden'], ['45', 'Nordosten'], ['90', 'Osten'], ['135', 'Südosten'], ['180', 'Süden'], ['225', 'Südwesten'], ['270', 'Westen'], ['315', 'Nordwesten']];
+
+function clearCandidates() {
+  if (roundCtrl) { roundCtrl.abort(); roundCtrl = null; setRoundBusy(false); }
+  if (!cands.length) return;
+  cands = []; candSel = -1;
+  renderCandidates();
+}
+
+function setRoundBusy(on, text) {
+  $('btnRound').disabled = on;
+  $('btnRound').textContent = on ? 'Wird berechnet …' : (cands.length ? 'Neue Vorschläge' : 'Rundtour vorschlagen');
+  $('roundStatus').hidden = !text;
+  $('roundStatus').textContent = text || '';
+}
+
+async function runRoundTrip() {
+  const start = state.waypoints[0];
+  if (start.lat == null) return toast('Wähle zuerst einen Startpunkt.');
+  const km = state.round.km;
+  if (!(km >= 5 && km <= 300)) return toast('Gib eine Länge zwischen 5 und 300 km ein.');
+  clearCandidates();
+  if (routeCtrl) routeCtrl.abort();
+  roundCtrl = new AbortController();
+  const ctrl = roundCtrl;
+  setRoundBusy(true, 'Die App probiert mehrere Richtungen aus. Das dauert einen Moment.');
+  $('busy').hidden = false;
+  try {
+    const res = await generateRoundTrips({
+      start: { lat: start.lat, lon: start.lon }, km, climb: state.round.climb,
+      direction: state.round.dir === 'any' ? null : +state.round.dir,
+      profile: state.profile, options: state.options[state.profile], nogos: state.nogos, signal: ctrl.signal,
+      onProgress: (done, total) => { if (ctrl === roundCtrl) setRoundBusy(true, `${done} von ${total} Richtungen berechnet …`); },
+    });
+    if (ctrl !== roundCtrl) return;
+    roundCtrl = null;
+    cands = res;
+    setRoundBusy(false);
+    fitNext = true;
+    applyCandidate(0);
+  } catch (e) {
+    if (e.name === 'AbortError' || ctrl !== roundCtrl) return;
+    roundCtrl = null;
+    setRoundBusy(false);
+    toast(e instanceof RouteError ? e.message : 'Die Rundtour konnte nicht berechnet werden.', true);
+    if (!(e instanceof RouteError)) console.error(e);
+  } finally {
+    if (!roundCtrl && !routeCtrl) $('busy').hidden = true;
+    if (!roundCtrl) $('busy').hidden = true;
+  }
+}
+
+// Übernimmt einen Vorschlag als bearbeitbare Route (Start, drei Wegpunkte, zurück zum Start).
+function applyCandidate(i) {
+  i = +i;
+  const c = cands[i];
+  if (!c) return;
+  candSel = i;
+  const start = state.waypoints[0];
+  state.waypoints = [start, ...c.vias.map((v, k) => ({ id: uid(), lat: v.lat, lon: v.lon, label: 'Wegpunkt ' + (k + 1) }))];
+  state.loop = true;
+  alt = 0;
+  if (routeCtrl) { routeCtrl.abort(); routeCtrl = null; }
+  clearTimeout(routeTimer);
+  route = c.route;
+  save();
+  renderLoop();
+  renderWaypoints();
+  renderCandidates();
+  showRoute();
+}
+
+function renderCandidates() {
+  const list = $('candList');
+  list.replaceChildren();
+  $('candWrap').hidden = cands.length === 0;
+  setOverlay('cands', { type: 'FeatureCollection', features: cands.map((c, i) => (i === candSel ? null : lineFeature(c.route, { i }))).filter(Boolean) });
+  if (!cands.length) { $('btnRound').textContent = 'Rundtour vorschlagen'; return; }
+  $('btnRound').textContent = 'Neue Vorschläge';
+  const perKm = cands.map((c) => c.route.ascent / c.route.dist);
+  const flat = perKm.indexOf(Math.min(...perKm)), hilly = perKm.indexOf(Math.max(...perKm));
+  cands.forEach((c, i) => {
+    const r = c.route, total = r.dist || 1;
+    const unpaved = ((r.surfaceShare.schotter || 0) + (r.surfaceShare.natur || 0)) / total * 100;
+    const tag = cands.length > 1 && flat !== hilly ? (i === flat ? 'am flachsten' : i === hilly ? 'am bergigsten' : '') : '';
+    list.append(h('li', {}, h('button', { type: 'button', class: 'cand', 'aria-pressed': String(i === candSel), onclick: () => applyCandidate(i) },
+      h('span', { class: 'cand-top' }, h('span', { class: 'cand-name', text: c.name }), tag ? h('span', { class: 'cand-tag', text: tag }) : null),
+      h('span', { class: 'cand-nums' },
+        h('span', {}, h('b', { text: fmt(r.dist / 1000, 1) }), ' km'),
+        h('span', {}, h('b', { text: fmt(r.ascent) }), ' hm'),
+        h('span', {}, h('b', { text: formatTime(r.dist / 1000 / state.speeds[state.profile]).replace(' h', '') }), ' h'),
+        h('span', {}, h('b', { text: fmt(unpaved) }), ' % unbefestigt')))));
+  });
+}
+
+function renderLoop() {
+  $('loopSwitch').checked = state.loop;
+}
+
+function renderMode() {
+  for (const b of $('modeSeg').children) b.setAttribute('aria-checked', String(b.dataset.mode === state.mode));
+  document.body.dataset.mode = state.mode;
+  $('roundBlock').hidden = state.mode !== 'round';
+  $('routeExtras').hidden = state.mode !== 'route';
+}
+
+function initRound() {
+  const seg = $('modeSeg');
+  for (const [mode, label] of [['route', 'Route planen'], ['round', 'Rundtour erstellen']]) {
+    seg.append(h('button', { type: 'button', role: 'radio', 'data-mode': mode, text: label, onclick: () => {
+      if (state.mode === mode) return;
+      state.mode = mode;
+      save(); renderMode(); renderWaypoints();
+      if (isMobile()) setSheet('half');
+    } }));
+  }
+  const km = $('roundKm');
+  km.value = state.round.km;
+  km.addEventListener('change', () => { const v = parseFloat(km.value); if (v >= 5 && v <= 300) { state.round.km = v; save(); renderChips(); } else km.value = state.round.km; });
+  const renderChips = () => {
+    $('kmChips').replaceChildren(...[30, 50, 80, 100].map((v) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(state.round.km === v), text: v + ' km',
+      onclick: () => { state.round.km = v; km.value = v; save(); renderChips(); } })));
+  };
+  renderChips();
+  const dir = $('roundDir');
+  for (const [v, label] of DIRS) dir.append(h('option', { value: v, text: label, selected: v === state.round.dir }));
+  dir.addEventListener('change', () => { state.round.dir = dir.value; save(); });
+  const renderClimb = () => {
+    $('climbSeg').replaceChildren(...[['flat', 'wenig'], ['any', 'egal'], ['hilly', 'viel']].map(([v, label]) => h('button', { type: 'button', role: 'radio',
+      'aria-checked': String(state.round.climb === v), text: label, onclick: () => { state.round.climb = v; save(); renderClimb(); } })));
+  };
+  renderClimb();
+  $('btnRound').addEventListener('click', runRoundTrip);
+  $('btnEditWp').addEventListener('click', () => { state.mode = 'route'; save(); renderMode(); renderWaypoints(); });
+  $('loopSwitch').addEventListener('change', () => {
+    state.loop = $('loopSwitch').checked;
+    fitNext = true;
+    renderWaypoints(); changed();
+  });
+  renderLoop();
+  renderMode();
+}
+
 // ---------------------------------------------------------------- Export
 
 function defaultTourName() {
   const pts = state.waypoints.filter((w) => w.lat != null);
-  if (pts.length < 2) return 'Tour';
+  if (pts.length < 2 && !state.loop) return 'Tour';
   const short = (s) => s.split(',')[0];
   const a = short(pts[0].label), b = short(pts[pts.length - 1].label);
   const km = route ? ' ' + fmt(route.dist / 1000) + ' km' : '';
-  return (a === b ? 'Runde ab ' + a : a + ' – ' + b) + km;
+  return (state.loop || a === b ? 'Runde ab ' + a : a + ' – ' + b) + km;
 }
 
 function gpxFile() {
@@ -630,7 +870,7 @@ function hideToast() { $('toast').hidden = true; }
 function placeDock() {
   const slot = isMobile() ? $('dockSlotMobile') : $('dockSlotDesktop');
   if ($('dock').parentElement !== slot) slot.append($('dock'));
-  requestAnimationFrame(() => map && map.invalidateSize());
+  requestAnimationFrame(() => map && map.resize());
 }
 
 const SHEET = ['peek', 'half', 'full'];
@@ -674,6 +914,7 @@ function initSheet() {
 function init() {
   load();
   initMap();
+  initRound();
   chart = createProfileChart($('profileChart'), { onHover: (d, p) => setHover(d, p) });
   initSheet();
   placeDock();
@@ -688,23 +929,17 @@ function init() {
   $('tourName').value = state.tourName;
   $('tourName').addEventListener('input', () => { state.tourName = $('tourName').value; save(); });
   $('btnAddVia').addEventListener('click', () => {
-    state.waypoints.splice(state.waypoints.length - 1, 0, emptyWp());
+    const at = state.loop ? state.waypoints.length : state.waypoints.length - 1;
+    state.waypoints.splice(at, 0, emptyWp());
     renderWaypoints();
-    const inputs = $('wpList').querySelectorAll('input');
-    inputs[inputs.length - 2].focus();
-  });
-  $('btnLoop').addEventListener('click', () => {
-    const s = state.waypoints[0], last = state.waypoints[state.waypoints.length - 1];
-    if (s.lat == null) return;
-    if (last.lat != null) state.waypoints.push(emptyWp());
-    fitNext = true;
-    setWaypoint(state.waypoints.length - 1, s.lat, s.lon, s.label);
-    if (state.waypoints.filter((w) => w.lat != null).length < 3) toast('Setze jetzt ein Zwischenziel, damit eine Runde entsteht.');
+    $('wpList').querySelectorAll('input')[at].focus();
   });
   $('btnReverse').addEventListener('click', () => { state.waypoints.reverse(); renderWaypoints(); changed(); });
   $('btnNew').addEventListener('click', () => {
     state.waypoints = [emptyWp(), emptyWp()];
     state.nogos = [];
+    state.loop = false;
+    renderLoop();
     state.tourName = '';
     $('tourName').value = '';
     fitNext = true;
@@ -726,7 +961,7 @@ function init() {
     $('btnShare').hidden = false;
     $('btnShare').addEventListener('click', shareGpx);
   }
-  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') toggleLayerMenu(false); });
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { toggleLayerMenu(false); closeMenu(); } });
 
   if (state.waypoints.filter((w) => w.lat != null).length >= 2) calcRoute();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

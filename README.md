@@ -12,14 +12,16 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 - GPX-Export (z. B. für Garmin Edge)
 - Einstellungen, Favoriten und die letzte Tour werden lokal im Browser gespeichert
 
-Geplant: automatische Rundtouren nach Wunschlänge, Wetter und Wind entlang der Strecke.
+- Hin und zurück sowie automatische Rundtouren nach Wunschlänge, Richtung und Höhenmeter-Vorliebe
+
+Geplant: Wetter und Wind entlang der Strecke.
 
 ## Dienste und Daten
 
 | Zweck | Dienst |
 |---|---|
 | Routing | [BRouter](https://brouter.de) (öffentlicher Server) |
-| Karten | [CyclOSM](https://www.cyclosm.org), [OpenTopoMap](https://opentopomap.org), CARTO, Esri (Satellit) |
+| Karten | [OpenFreeMap](https://openfreemap.org) (Standard), [CyclOSM](https://www.cyclosm.org), [OpenTopoMap](https://opentopomap.org), Esri (Satellit) |
 | Suche | [Photon](https://photon.komoot.io) |
 | Kartendaten | © [OpenStreetMap](https://www.openstreetmap.org/copyright)-Mitwirkende |
 
@@ -28,12 +30,12 @@ Geplant: automatische Rundtouren nach Wunschlänge, Wetter und Wind entlang der 
 - `index.html`, `css/app.css`, `js/` – die App (kein Build-Schritt nötig)
 - `profiles/` – Routing-Profile, die die App an BRouter schickt
 - `tools/build_profiles.py` – erzeugt die Profile aus den offiziellen BRouter-Profilen in `tools/`
-- `vendor/` – Leaflet und die Schrift Barlow
+- `vendor/` – MapLibre GL JS und die Schrift Barlow
 
 Lokal starten: `python3 -m http.server` im Projektordner, dann `http://localhost:8000` öffnen.
 
 ## Lizenzen der enthaltenen Teile
 
 - Routing-Profile: abgeleitet von den BRouter-Profilen `fastbike`, `trekking` und `gravel` (MIT-Lizenz, © Arndt Brenschede und Mitwirkende)
-- Leaflet: BSD-2-Clause
+- MapLibre GL JS: BSD-3-Clause
 - Barlow: SIL Open Font License 1.1
