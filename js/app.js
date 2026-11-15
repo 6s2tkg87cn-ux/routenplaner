@@ -733,7 +733,7 @@ function showRoute() {
   const has = !!route;
   $('dock').hidden = !has;
   $('tourBlock').hidden = !has;
-  $('btnNav').hidden = !has;
+  $('btnNav').hidden = !has || !canNavigate();
   document.body.classList.toggle('has-route', has);
   setOverlay('route', has ? { type: 'FeatureCollection', features: [lineFeature(route)] } : EMPTY);
   setOverlay('sel', EMPTY);
@@ -1175,6 +1175,8 @@ function renderWeather(w, note) {
 // ---------------------------------------------------------------- Navigation
 
 let nav = null, wakeLock = null;
+// Navigation gibt es nur auf Geräten mit Touch-Bedienung (Handy, Tablet), nicht am Computer
+const canNavigate = () => window.matchMedia('(pointer: coarse)').matches;
 
 async function keepAwake(on) {
   try {
@@ -1184,7 +1186,7 @@ async function keepAwake(on) {
 }
 
 function startNav() {
-  if (!route) return;
+  if (!route || !canNavigate()) return;
   if (!navigator.geolocation) return toast('Dieser Browser kann den Standort nicht bestimmen.', true);
   nav = { d: 0, off: 0, follow: true, heading: routeBearing(route, 0), last: null, rerouteAt: 0, busy: false, arrived: false };
   closeMenu();
