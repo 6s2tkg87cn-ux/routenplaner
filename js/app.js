@@ -1215,7 +1215,7 @@ async function updatePois() {
   try {
     const pois = await fetchPois(r, state.poiCats, ctrl.signal);
     if (ctrl !== poiCtrl || r !== route) return;
-    status.textContent = pois.length ? `${pois.length} Stopps an der Strecke. Tippe auf ein Symbol in der Karte.` : 'Keine passenden Stopps direkt an der Strecke gefunden.';
+    status.textContent = pois.length ? `${pois.length} Stopps an der Strecke. Tippe auf ein Symbol in der Karte.` : 'Keine passenden Stopps im Umkreis von 300 m um die Strecke gefunden.';
     for (const q of pois) {
       const elm = h('button', { type: 'button', class: 'poi poi-' + q.cat, title: q.name, text: POI_CATS[q.cat].icon });
       elm.addEventListener('click', (ev) => {

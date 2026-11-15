@@ -24,27 +24,51 @@ export class PoiError extends Error {}
 const SERVERS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
 const cache = new WeakMap(); // Route -> { Kategorie: Stopps }
 
-// Eine Anfrage an den ersten Server, der innerhalb von 12 Sekunden antwortet.
+// Fragt alle Server gleichzeitig und nimmt die erste brauchbare Antwort. Die öffentlichen Server sind
+// oft einzeln überlastet; so reicht es, wenn einer von ihnen gerade antwortet.
 async function overpass(query, signal) {
-  let lastStatus = 0;
-  for (const url of SERVERS) {
+  const ctrls = [];
+  let busy = false;
+  const ask = async (url) => {
     const ctrl = new AbortController();
-    const onAbort = () => ctrl.abort();
-    if (signal) signal.addEventListener('abort', onAbort);
-    const timer = setTimeout(() => ctrl.abort(), 12000);
-    try {
-      const res = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(query), signal: ctrl.signal,
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
-      if (res.ok) return await res.json();
-      lastStatus = res.status;
-    } catch (e) {
-      if (signal && signal.aborted) { const err = new Error('abgebrochen'); err.name = 'AbortError'; throw err; }
-    } finally {
-      clearTimeout(timer);
-      if (signal) signal.removeEventListener('abort', onAbort);
-    }
+    ctrls.push(ctrl);
+    const res = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(query), signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    if (!res.ok) { if (res.status === 429 || res.status === 504) busy = true; throw new Error('Status ' + res.status); }
+    const json = await res.json(); // wirft, wenn der Server eine Fehlerseite statt Daten schickt
+    if (!Array.isArray(json.elements)) throw new Error('keine Daten');
+    // Abgebrochene Abfrage auf dem Server (Zeit oder Speicher überschritten) nicht als leeres Ergebnis werten
+    if (json.remark && /runtime error|timed out|out of memory/i.test(json.remark)) { busy = true; throw new Error(json.remark); }
+    return json;
+  };
+  const stopAll = () => ctrls.forEach((c) => c.abort());
+  const timer = setTimeout(stopAll, 30000);
+  if (signal) signal.addEventListener('abort', stopAll);
+  try {
+    return await Promise.any(SERVERS.map(ask));
+  } catch (e) {
+    if (signal && signal.aborted) { const err = new Error('abgebrochen'); err.name = 'AbortError'; throw err; }
+    throw new PoiError(busy ? 'Die Server für die Stopps sind gerade ausgelastet. Tippe die Kategorie in einer Minute noch einmal an.'
+      : 'Die Stopps konnten nicht geladen werden. Prüfe die Internetverbindung und tippe die Kategorie noch einmal an.');
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', stopAll);
+    stopAll();
   }
-  throw new PoiError(lastStatus === 429 || lastStatus === 504 ? 'Der Dienst für die Stopps ist gerade ausgelastet. Versuche es gleich noch einmal.' : 'Die Stopps konnten nicht geladen werden.');
+}
+
+// Abstand eines Punkts zur Route in Metern (zu den Streckenstücken um den nächstgelegenen Streckenpunkt)
+function distToRoute(route, i, lat, lon) {
+  const k = Math.cos(lat * Math.PI / 180), M = 111320;
+  let best = Infinity;
+  for (let j = Math.max(0, i - 1); j < Math.min(route.n - 1, i + 1); j++) {
+    const ax = (route.lon[j] - lon) * k * M, ay = (route.lat[j] - lat) * M;
+    const bx = (route.lon[j + 1] - lon) * k * M, by = (route.lat[j + 1] - lat) * M;
+    const dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+    const t = len ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len)) : 0;
+    best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
+  }
+  return Number.isFinite(best) ? best : Math.hypot((route.lon[i] - lon) * k * M, (route.lat[i] - lat) * M);
 }
 
 // Rechtecke um Streckenabschnitte von etwa 12 km: schnelle Flächenabfrage statt Suche entlang jeder Kurve
@@ -58,13 +82,13 @@ function boxes(route) {
       const p = pointAt(route, Math.min(d, d1));
       s = Math.min(s, p.lat); nn = Math.max(nn, p.lat); w = Math.min(w, p.lon); e = Math.max(e, p.lon);
     }
-    const padLat = 0.003, padLon = 0.003 / Math.cos(s * Math.PI / 180);
+    const padLat = 0.004, padLon = 0.004 / Math.cos(s * Math.PI / 180);
     out.push(`(${(s - padLat).toFixed(4)},${(w - padLon).toFixed(4)},${(nn + padLat).toFixed(4)},${(e + padLon).toFixed(4)})`);
   }
   return out;
 }
 
-/** Sucht Stopps bis 200 m neben der Route. cats: Liste der gewünschten Kategorien. Ergebnisse werden je Route gemerkt. */
+/** Sucht Stopps bis 300 m neben der Route. cats: Liste der gewünschten Kategorien. Ergebnisse werden je Route gemerkt. */
 export async function fetchPois(route, cats, signal) {
   if (!cats.length) return [];
   let store = cache.get(route);
@@ -76,14 +100,13 @@ export async function fetchPois(route, cats, signal) {
     const json = await overpass('[out:json][timeout:20];(' + parts.join('') + ');out center tags 1500;', signal);
     const found = Object.fromEntries(missing.map((c) => [c, []]));
     const seen = new Set();
-    const k = Math.cos(route.lat[0] * Math.PI / 180);
     for (const e of json.elements || []) {
       const lat = e.lat != null ? e.lat : e.center && e.center.lat, lon = e.lon != null ? e.lon : e.center && e.center.lon;
       const t = e.tags || {}, cat = categoryOf(t);
       if (lat == null || !cat || !found[cat]) continue;
       const i = nearestIndex(route, lat, lon);
-      // höchstens rund 200 m neben der Strecke
-      if (Math.hypot((route.lon[i] - lon) * k, route.lat[i] - lat) * 111320 > 200) continue;
+      // höchstens 300 m neben der Strecke
+      if (distToRoute(route, i, lat, lon) > 300) continue;
       const key = cat + (t.name || '') + lat.toFixed(3) + lon.toFixed(3);
       if (seen.has(key)) continue;
       seen.add(key);

@@ -1,6 +1,6 @@
 // Service Worker: hält die App-Dateien vor, damit sie schnell startet und sich installieren lässt.
 // Karten, Routing, Suche und Wetter kommen immer live aus dem Netz.
-const CACHE = 'rueckenwind-v6';
+const CACHE = 'rueckenwind-v7';
 const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/routing.js', 'js/elevation.js', 'js/roundtrip.js', 'js/weather.js', 'js/pois.js',
   'vendor/maplibre/maplibre-gl.js', 'vendor/maplibre/maplibre-gl.css',
   'profiles/rennrad.brf', 'profiles/gravel.brf', 'profiles/alltag.brf',
@@ -19,7 +19,8 @@ self.addEventListener('fetch', (ev) => {
   const url = new URL(ev.request.url);
   if (ev.request.method !== 'GET' || url.origin !== location.origin) return;
   ev.respondWith(
-    fetch(ev.request).then((res) => {
+    // 'no-cache': immer beim Server nachfragen, damit nach einem Update nicht alte und neue Dateien gemischt werden
+    fetch(ev.request.mode === 'navigate' ? ev.request : new Request(ev.request.url, { cache: 'no-cache' })).then((res) => {
       if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(ev.request, copy)); }
       return res;
     }).catch(() => caches.match(ev.request, { ignoreSearch: true }).then((hit) => hit || caches.match('index.html')))
