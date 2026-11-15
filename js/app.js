@@ -100,7 +100,24 @@ const LAYERS = {
 let map, chart, hoverMarker = null, popup = null;
 let markers = [], nogoMarkers = [];
 const EMPTY = { type: 'FeatureCollection', features: [] };
-const overlay = { route: EMPTY, cands: EMPTY, nogo: EMPTY };
+const overlay = { route: EMPTY, cands: EMPTY, nogo: EMPTY, wind: EMPTY };
+
+// Weißer Winkel, der in Fahrtrichtung zeigt (wird entlang der Route wiederholt)
+function chevronImage() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 24;
+  const g = c.getContext('2d');
+  g.strokeStyle = '#ffffff'; g.lineWidth = 3.4; g.lineCap = 'round'; g.lineJoin = 'round';
+  g.beginPath(); g.moveTo(9, 6); g.lineTo(15, 12); g.lineTo(9, 18); g.stroke();
+  return g.getImageData(0, 0, 24, 24);
+}
+// Teilstück der Route zwischen zwei Distanzen als Linie
+function sliceFeature(r, from, to, props) {
+  const a = pointAt(r, from), b = pointAt(r, to), coordinates = [[a.lon, a.lat]];
+  for (let i = a.i + 1; i <= b.i; i++) coordinates.push([r.lon[i], r.lat[i]]);
+  coordinates.push([b.lon, b.lat]);
+  return { type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates } };
+}
 
 function setLayer(key) {
   if (!LAYERS[key]) key = 'standard';
@@ -114,15 +131,22 @@ function setLayer(key) {
 // nach jedem Stilwechsel neu angelegt.
 function addOverlays() {
   if (map.getSource('route')) return;
-  for (const k of ['nogo', 'cands', 'route']) map.addSource(k, { type: 'geojson', data: overlay[k] });
+  for (const k of ['nogo', 'cands', 'wind', 'route']) map.addSource(k, { type: 'geojson', data: overlay[k] });
+  if (!map.hasImage('chevron')) map.addImage('chevron', chevronImage(), { pixelRatio: 2 });
   const round = { 'line-cap': 'round', 'line-join': 'round' };
   map.addLayer({ id: 'nogo-fill', type: 'fill', source: 'nogo', paint: { 'fill-color': '#b3261e', 'fill-opacity': 0.14 } });
   map.addLayer({ id: 'nogo-line', type: 'line', source: 'nogo', paint: { 'line-color': '#b3261e', 'line-width': 2, 'line-dasharray': [3, 2.5] } });
   map.addLayer({ id: 'cand-casing', type: 'line', source: 'cands', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9 } });
   map.addLayer({ id: 'cand-line', type: 'line', source: 'cands', layout: round, paint: { 'line-color': '#47595d', 'line-width': 3.5 } });
   map.addLayer({ id: 'cand-hit', type: 'line', source: 'cands', paint: { 'line-color': '#000', 'line-width': 24, 'line-opacity': 0.01 } });
+  // Wind als farbiger Rand der Route: rot = Gegenwind, violett = Rückenwind
+  map.addLayer({ id: 'wind-halo', type: 'line', source: 'wind', layout: round,
+    paint: { 'line-color': ['match', ['get', 'cls'], 'head', '#d03b3b', '#6250d6'], 'line-width': 15, 'line-opacity': 0.9 } });
   map.addLayer({ id: 'route-casing', type: 'line', source: 'route', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 9, 'line-opacity': 0.95 } });
   map.addLayer({ id: 'route-line', type: 'line', source: 'route', layout: round, paint: { 'line-color': '#d0146a', 'line-width': 5 } });
+  // kleine Pfeile in Fahrtrichtung
+  map.addLayer({ id: 'route-dir', type: 'symbol', source: 'route', layout: { 'symbol-placement': 'line', 'symbol-spacing': 110,
+    'icon-image': 'chevron', 'icon-size': 0.9, 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-rotation-alignment': 'map' } });
   map.addLayer({ id: 'route-hit', type: 'line', source: 'route', paint: { 'line-color': '#000', 'line-width': 24, 'line-opacity': 0.01 } });
 }
 function setOverlay(key, data) {
@@ -963,28 +987,18 @@ async function updateWeather() {
   }
 }
 
-// Wind auf der Karte: Pfeile entlang der Route (Farbe = Gegen-, Seiten- oder Rückenwind) und ein Hinweis oben
-let windMarkers = [], lastWind = null;
+// Wind auf der Karte: farbiger Rand an der Route (rot = Gegenwind, violett = Rückenwind) und ein Hinweis oben
+let lastWind = null;
 function renderWindMap(a, r) {
   if (a !== undefined) lastWind = a ? { a, r } : null;
-  windMarkers.forEach((m) => m.remove());
-  windMarkers = [];
   const badge = $('windBadge');
   $('wxMapRow').hidden = !lastWind;
-  if (!lastWind || !state.windOnMap || lastWind.r !== route) { badge.hidden = true; return; }
+  if (!lastWind || !state.windOnMap || lastWind.r !== route) { badge.hidden = true; setOverlay('wind', EMPTY); return; }
   const { a: an, r: rt } = lastWind;
-  badge.replaceChildren(windArrow(an.wdir), h('span', {}, h('b', { text: fmt(an.wind) + ' km/h' }), ' aus ' + compass(an.wdir)));
+  badge.replaceChildren(windArrow(an.wdir), h('span', {}, h('b', { text: fmt(an.wind) + ' km/h' }), ' aus ' + compass(an.wdir)),
+    h('span', { class: 'wind-key' }, h('i', { class: 'sw wind-head' }), 'Gegenwind'), h('span', { class: 'wind-key' }, h('i', { class: 'sw wind-tail' }), 'Rückenwind'));
   badge.hidden = false;
-  if (an.wind < 4) return;
-  const n = Math.max(3, Math.min(14, Math.round(rt.dist / 5000)));
-  for (let i = 0; i < n; i++) {
-    const d = ((i + 0.5) / n) * rt.dist, p = pointAt(rt, d);
-    const b = an.bins.find((k) => d >= k.from && d <= k.to);
-    if (!b) continue;
-    const name = b.cls === 'head' ? 'Gegenwind' : b.cls === 'tail' ? 'Rückenwind' : 'Seitenwind';
-    const elm = h('div', { class: 'wind-pin wind-pin-' + b.cls, title: `${name}, ${fmt(b.wind)} km/h` }, windArrow(b.wdir));
-    windMarkers.push(new maplibregl.Marker({ element: elm }).setLngLat([p.lon, p.lat]).addTo(map));
-  }
+  setOverlay('wind', { type: 'FeatureCollection', features: an.bins.filter((b) => b.cls !== 'side').map((b) => sliceFeature(rt, b.from, b.to, { cls: b.cls })) });
 }
 
 function windArrow(from) {
@@ -1180,7 +1194,7 @@ function renderPoiChips() {
     } })));
 }
 
-function schedulePois(delay = 900) {
+function schedulePois(delay = 300) {
   clearTimeout(poiTimer);
   poiTimer = setTimeout(updatePois, delay);
 }
@@ -1208,7 +1222,7 @@ async function updatePois() {
           h('strong', { text: q.name }),
           h('span', { class: 'menu-note', text: `${POI_CATS[q.cat].label}, bei km ${fmt(q.d / 1000, 1)}` }),
           q.hours ? h('span', { class: 'menu-note', text: q.hours }) : null,
-          state.mode === 'route' ? h('button', { type: 'button', text: 'Als Wegpunkt einfügen', onclick: () => { closeMenu(); addVia(q.lat, q.lon); } }) : null), 14);
+          h('button', { type: 'button', text: 'Als Wegpunkt einfügen', onclick: () => { closeMenu(); addVia(q.lat, q.lon); } })), 14);
       });
       poiMarkers.push(new maplibregl.Marker({ element: elm }).setLngLat([q.lon, q.lat]).addTo(map));
     }
@@ -1249,7 +1263,7 @@ function safeBottom() {
 }
 function sheetHeights() {
   const vh = window.innerHeight, full = vh - 48;
-  return { full, half: Math.round(vh * 0.5), peek: (route ? 118 : 86) + safeBottom() };
+  return { full, half: Math.round(vh * 0.5), peek: (route ? 98 : 86) + safeBottom() };
 }
 function sheetVisible() { return isMobile() ? sheetHeights()[sheetMode] : 0; }
 function applySheet(y, visible) {

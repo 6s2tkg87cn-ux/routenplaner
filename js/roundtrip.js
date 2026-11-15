@@ -163,6 +163,10 @@ export async function generateDetours({ start, end, km, directDist, profile, opt
  */
 export async function generateRoundTrips({ start, km, direction, climb, profile, options, nogos, signal, onProgress, wind }) {
   const target = km * 1000;
+  // Ohne Wunschrichtung und bei spürbarem Wind geht es zuerst gegen den Wind hinaus:
+  // Der fernste Punkt liegt dann dort, wo der Wind herkommt, und der Heimweg hat Rückenwind.
+  const windy = wind && wind.speed >= 8;
+  if (direction == null && windy) direction = wind.from;
   const base = direction == null ? Math.random() * 360 : direction + (Math.random() * 16 - 8);
   const bearings = direction == null ? [0, 90, 180, 270].map((d) => base + d) : [-50, -17, 17, 50].map((d) => base + d);
   let done = 0;
