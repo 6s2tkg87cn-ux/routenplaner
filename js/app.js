@@ -35,6 +35,7 @@ const state = {
   speeds: Object.fromEntries(Object.entries(PROFILES).map(([k, p]) => [k, p.speed])),
   layer: 'standard',
   layerV: 2,
+  trails: 'none',
   mode: 'route',
   loop: false,
   round: { km: 50, dir: 'any', climb: 'any', wind: true },
@@ -62,6 +63,7 @@ function load() {
     for (const p in DEFAULT_OPTIONS) state.options[p] = { ...DEFAULT_OPTIONS[p], ...(s.options && s.options[p]) };
     for (const p in PROFILES) if (s.speeds && s.speeds[p] > 0) state.speeds[p] = s.speeds[p];
     if (s.layer && s.layerV === 2) state.layer = s.layer;
+    if (typeof s.trails === 'string') state.trails = s.trails;
     if (s.mode === 'round') state.mode = 'round';
     state.loop = !!s.loop;
     if (s.round) state.round = { ...state.round, ...s.round };
@@ -93,13 +95,32 @@ const raster = (tiles, attribution, maxzoom) => ({
 });
 const LAYERS = {
   standard: { label: 'Standard', style: 'https://tiles.openfreemap.org/styles/liberty' },
+  hell: { label: 'Hell', style: 'https://tiles.openfreemap.org/styles/positron' },
   radkarte: { label: 'Radkarte', style: raster(['a', 'b', 'c'].map((s) => `https://${s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png`),
     '<a href="https://www.cyclosm.org" target="_blank" rel="noopener">CyclOSM</a> | ' + OSM, 19) },
   topo: { label: 'Topo', style: raster(['a', 'b', 'c'].map((s) => `https://${s}.tile.opentopomap.org/{z}/{x}/{y}.png`),
     OSM + ', SRTM | <a href="https://opentopomap.org" target="_blank" rel="noopener">OpenTopoMap</a>', 17) },
+  topplus: { label: 'Topo amtlich (DE)', style: raster(['https://sgx.geodatenzentrum.de/wmts_topplus_open/tile/1.0.0/web/default/WEBMERCATOR/{z}/{y}/{x}.png'],
+    '© <a href="https://www.bkg.bund.de" target="_blank" rel="noopener">Bundesamt für Kartographie und Geodäsie</a>, TopPlusOpen', 18) },
+  basemapat: { label: 'Österreich', style: raster(['https://mapsneu.wien.gv.at/basemap/geolandbasemap/normal/google3857/{z}/{y}/{x}.png'],
+    'Datenquelle: <a href="https://www.basemap.at" target="_blank" rel="noopener">basemap.at</a>', 19) },
   satellit: { label: 'Satellit', style: raster(['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
     'Bilder © Esri, Maxar, Earthstar Geographics', 19) },
 };
+
+// Markierte Routen als Überlagerung über jeder Grundkarte
+const TRAILS = { none: 'Keine', hiking: 'Wanderwege', cycling: 'Radrouten', mtb: 'MTB-Routen' };
+function applyTrails() {
+  if (!map.isStyleLoaded() && !map.getSource('route')) return;
+  if (map.getLayer('trails')) map.removeLayer('trails');
+  if (map.getSource('trails')) map.removeSource('trails');
+  for (const b of $('layerMenu').querySelectorAll('[data-trail]')) b.setAttribute('aria-checked', String(b.dataset.trail === state.trails));
+  if (!TRAILS[state.trails] || state.trails === 'none') return;
+  map.addSource('trails', { type: 'raster', tiles: [`https://tile.waymarkedtrails.org/${state.trails}/{z}/{x}/{y}.png`], tileSize: 256, maxzoom: 17,
+    attribution: 'Routen: <a href="https://waymarkedtrails.org" target="_blank" rel="noopener">Waymarked Trails</a>' });
+  // unter den eigenen Ebenen (Route, Sperrzonen), über der Grundkarte
+  map.addLayer({ id: 'trails', type: 'raster', source: 'trails', paint: { 'raster-opacity': 0.85 } }, map.getLayer('nogo-fill') ? 'nogo-fill' : undefined);
+}
 
 let map, chart, hoverMarker = null, popup = null;
 let markers = [], nogoMarkers = [];
@@ -127,7 +148,7 @@ function setLayer(key) {
   if (!LAYERS[key]) key = 'standard';
   state.layer = key;
   map.setStyle(LAYERS[key].style, { diff: false });
-  for (const b of $('layerMenu').children) b.setAttribute('aria-checked', b.dataset.key === key ? 'true' : 'false');
+  for (const b of $('layerMenu').querySelectorAll('[data-key]')) b.setAttribute('aria-checked', b.dataset.key === key ? 'true' : 'false');
   save();
 }
 
@@ -154,6 +175,7 @@ function addOverlays() {
   map.addLayer({ id: 'route-dir', type: 'symbol', source: 'route', layout: { 'symbol-placement': 'line', 'symbol-spacing': 110,
     'icon-image': 'chevron', 'icon-size': 0.9, 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-rotation-alignment': 'map' } });
   map.addLayer({ id: 'route-hit', type: 'line', source: 'route', paint: { 'line-color': '#000', 'line-width': 24, 'line-opacity': 0.01 } });
+  applyTrails();
 }
 function setOverlay(key, data) {
   overlay[key] = data;
@@ -188,6 +210,11 @@ function initMap() {
   for (const key in LAYERS) {
     menu.append(h('button', { type: 'button', role: 'menuitemradio', 'data-key': key, text: LAYERS[key].label,
       'aria-checked': String(key === state.layer), onclick: () => { setLayer(key); toggleLayerMenu(false); } }));
+  }
+  menu.append(h('div', { class: 'menu-sep', text: 'Markierte Routen' }));
+  for (const key in TRAILS) {
+    menu.append(h('button', { type: 'button', role: 'menuitemradio', 'data-trail': key, text: TRAILS[key], 'aria-checked': String(key === state.trails),
+      onclick: () => { state.trails = key; save(); applyTrails(); toggleLayerMenu(false); } }));
   }
   $('btnLayers').addEventListener('click', () => toggleLayerMenu($('layerMenu').hidden));
 

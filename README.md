@@ -23,7 +23,7 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 | Zweck | Dienst |
 |---|---|
 | Routing | [BRouter](https://brouter.de) (öffentlicher Server) |
-| Karten | [OpenFreeMap](https://openfreemap.org) (Standard), [CyclOSM](https://www.cyclosm.org), [OpenTopoMap](https://opentopomap.org), Esri (Satellit) |
+| Karten | [OpenFreeMap](https://openfreemap.org) (Standard), [CyclOSM](https://www.cyclosm.org), [OpenTopoMap](https://opentopomap.org), TopPlusOpen (BKG), basemap.at, Esri (Satellit); Routen-Überlagerung von [Waymarked Trails](https://waymarkedtrails.org) |
 | Wetter | [Open-Meteo](https://open-meteo.com) |
 | Stopps | [Overpass API](https://overpass-api.de) |
 | Suche | [Photon](https://photon.komoot.io) |
