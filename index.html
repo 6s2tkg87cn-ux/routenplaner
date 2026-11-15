@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rückenwind – Routenplaner fürs Rad</title>
+<meta name="description" content="Routenplaner für Rennrad, Gravel und Alltag auf Basis von OpenStreetMap.">
+<meta name="theme-color" content="#12262b">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="app">
+
+  <aside id="panel" aria-label="Routenplanung">
+    <button id="sheetHandle" class="sheet-handle" type="button" aria-label="Bereich vergrößern oder verkleinern"><span></span></button>
+    <div id="dockSlotMobile"></div>
+
+    <div class="panel-scroll" id="panelScroll">
+      <header class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M5 23c5 0 5-6 10-6s4 5 8 5 4-12-2-13" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          <circle cx="5" cy="23" r="3.2" fill="currentColor"/><circle cx="20.5" cy="9" r="3.2" fill="currentColor"/>
+        </svg>
+        <span class="brand-name">Rückenwind</span>
+        <button id="btnNew" class="link-btn" type="button">Neue Tour</button>
+      </header>
+
+      <section class="block">
+        <div class="seg seg-profile" id="profileSeg" role="radiogroup" aria-label="Radtyp"></div>
+      </section>
+
+      <section class="block" aria-label="Wegpunkte">
+        <ol id="wpList" class="wp-list"></ol>
+        <div class="wp-actions">
+          <button id="btnAddVia" class="ghost-btn" type="button">Zwischenziel hinzufügen</button>
+          <button id="btnLoop" class="ghost-btn" type="button">Zurück zum Start</button>
+          <button id="btnReverse" class="ghost-btn" type="button">Richtung umkehren</button>
+        </div>
+        <p class="hint" id="mapHint">Tippe auf die Karte, um den Start zu setzen.</p>
+      </section>
+
+      <details class="block fold" id="optFold" open>
+        <summary><span>Optionen</span><button id="btnResetOpt" class="link-btn" type="button">Zurücksetzen</button></summary>
+        <div id="optList" class="opt-list"></div>
+        <p class="hint">Verkehr, Wald und Ortschaften sind Schätzwerte aus OpenStreetMap, keine Live-Messung.</p>
+      </details>
+
+      <section class="block" id="nogoBlock" hidden>
+        <h2>Sperrzonen</h2>
+        <ul id="nogoList" class="nogo-list"></ul>
+      </section>
+
+      <section class="block" id="tourBlock" hidden>
+        <h2>Tour</h2>
+        <label class="field-label" for="tourName">Name</label>
+        <input id="tourName" class="text-input" type="text" autocomplete="off" placeholder="Name der Tour">
+        <div id="composition"></div>
+        <div class="export-row">
+          <button id="btnGpx" class="primary-btn" type="button">GPX herunterladen</button>
+          <button id="btnShare" class="ghost-btn" type="button" hidden>GPX teilen</button>
+        </div>
+        <p class="hint">Die GPX-Datei kannst du in Garmin Connect importieren oder direkt auf den Edge kopieren.</p>
+      </section>
+
+      <section class="block">
+        <h2>Mein Tempo</h2>
+        <div class="speed-row">
+          <label for="speedInput" id="speedLabel">Durchschnitt mit dem Rennrad</label>
+          <span class="speed-field"><input id="speedInput" type="number" inputmode="decimal" min="5" max="60" step="0.5"> km/h</span>
+        </div>
+      </section>
+
+      <footer class="credits">
+        Routing: <a href="https://brouter.de" target="_blank" rel="noopener">BRouter</a>.
+        Karten und Daten: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>-Mitwirkende.
+        Suche: <a href="https://photon.komoot.io" target="_blank" rel="noopener">Photon</a>.
+      </footer>
+    </div>
+  </aside>
+
+  <main id="mapWrap">
+    <div id="map" aria-label="Karte"></div>
+    <div id="busy" class="busy" hidden></div>
+    <div class="map-tools">
+      <button id="btnLayers" class="tool-btn" type="button" aria-haspopup="true" aria-expanded="false" title="Kartenstil">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.5 8 12 13l9.5-5L12 3Z"/><path d="m2.5 12.5 9.5 5 9.5-5"/><path d="m2.5 17 9.5 5 9.5-5"/></svg>
+      </button>
+      <div id="layerMenu" class="layer-menu" hidden></div>
+      <button id="btnLocate" class="tool-btn" type="button" title="Mein Standort">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+      </button>
+    </div>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <div id="dockSlotDesktop"></div>
+  </main>
+</div>
+
+<section id="dock" class="dock" hidden aria-label="Ergebnis">
+  <div class="dock-head">
+    <dl class="stats">
+      <div class="stat stat-main"><dt>Distanz</dt><dd id="stDist">–</dd></div>
+      <div class="stat"><dt>Bergauf</dt><dd id="stUp">–</dd></div>
+      <div class="stat"><dt>Bergab</dt><dd id="stDown">–</dd></div>
+      <div class="stat"><dt>Fahrzeit</dt><dd id="stTime">–</dd></div>
+      <div class="stat stat-wide"><dt>Höchster Punkt</dt><dd id="stMax">–</dd></div>
+    </dl>
+    <div class="dock-side">
+      <div class="alt-wrap">
+        <span class="alt-label" id="altLabel">Variante</span>
+        <div class="seg seg-small" id="altSeg" role="radiogroup" aria-labelledby="altLabel"></div>
+      </div>
+    </div>
+  </div>
+  <div id="profileChart"></div>
+  <div class="chart-legend" aria-label="Legende">
+    <span class="lg-title">Steigung</span>
+    <span><i class="sw slope-1"></i>3–6 %</span><span><i class="sw slope-2"></i>6–9 %</span>
+    <span><i class="sw slope-3"></i>9–12 %</span><span><i class="sw slope-4"></i>über 12 %</span>
+    <span class="lg-title lg-gap">Untergrund</span>
+    <span><i class="sw surf-asphalt"></i>Asphalt</span><span><i class="sw surf-schotter"></i>Schotter</span>
+    <span><i class="sw surf-natur"></i>Naturboden</span><span><i class="sw surf-pflaster"></i>Pflaster</span>
+  </div>
+</section>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
