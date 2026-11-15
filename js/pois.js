@@ -21,35 +21,39 @@ function categoryOf(t) {
 
 export class PoiError extends Error {}
 
-const SERVERS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter', 'https://overpass.private.coffee/api/interpreter'];
+const SERVERS = ['https://overpass-api.de/api/interpreter', 'https://maps.mail.ru/osm/tools/overpass/api/interpreter', 'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter', 'https://overpass.openstreetmap.fr/api/interpreter'];
 const cache = new WeakMap(); // Route -> { Kategorie: Stopps }
 
 // Fragt alle Server gleichzeitig und nimmt die erste brauchbare Antwort. Die öffentlichen Server sind
 // oft einzeln überlastet; so reicht es, wenn einer von ihnen gerade antwortet.
 async function overpass(query, signal) {
-  const ctrls = [];
+  const ctrls = [], why = [];
   let busy = false;
-  const ask = async (url) => {
+  const ask = (url) => askOne(url).catch((e) => { why.push(new URL(url).hostname.split('.').slice(-2, -1)[0] + ': ' + (e.name === 'TypeError' ? 'keine Verbindung' : e.message)); throw e; });
+  const askOne = async (url) => {
     const ctrl = new AbortController();
     ctrls.push(ctrl);
     const res = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(query), signal: ctrl.signal,
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
     if (!res.ok) { if (res.status === 429 || res.status === 504) busy = true; throw new Error('Status ' + res.status); }
-    const json = await res.json(); // wirft, wenn der Server eine Fehlerseite statt Daten schickt
+    let json;
+    try { json = await res.json(); } catch (e) { if (e.name === 'AbortError') throw e; throw new Error('unlesbare Antwort'); }
     if (!Array.isArray(json.elements)) throw new Error('keine Daten');
     // Abgebrochene Abfrage auf dem Server (Zeit oder Speicher überschritten) nicht als leeres Ergebnis werten
     if (json.remark && /runtime error|timed out|out of memory/i.test(json.remark)) { busy = true; throw new Error(json.remark); }
     return json;
   };
   const stopAll = () => ctrls.forEach((c) => c.abort());
-  const timer = setTimeout(stopAll, 30000);
+  const timer = setTimeout(stopAll, 35000);
   if (signal) signal.addEventListener('abort', stopAll);
   try {
     return await Promise.any(SERVERS.map(ask));
   } catch (e) {
     if (signal && signal.aborted) { const err = new Error('abgebrochen'); err.name = 'AbortError'; throw err; }
-    throw new PoiError(busy ? 'Die Server für die Stopps sind gerade ausgelastet. Tippe die Kategorie in einer Minute noch einmal an.'
-      : 'Die Stopps konnten nicht geladen werden. Prüfe die Internetverbindung und tippe die Kategorie noch einmal an.');
+    // Kurzer Grund je Server, damit sich die Ursache eingrenzen lässt
+    throw new PoiError((busy ? 'Die Server für die Stopps sind gerade ausgelastet.' : 'Keiner der Server für die Stopps hat geantwortet.') +
+      ' (' + why.join('; ').slice(0, 200) + ')');
   } finally {
     clearTimeout(timer);
     if (signal) signal.removeEventListener('abort', stopAll);

@@ -1230,7 +1230,8 @@ async function updatePois() {
     }
   } catch (e) {
     if (e.name === 'AbortError') return;
-    status.textContent = e instanceof PoiError ? e.message : 'Die Stopps konnten nicht geladen werden.';
+    status.textContent = (e instanceof PoiError ? e.message : 'Die Stopps konnten nicht geladen werden.') + ' ';
+    status.append(h('button', { type: 'button', class: 'link-btn', text: 'Erneut versuchen', onclick: () => schedulePois(0) }));
   }
 }
 
