@@ -91,7 +91,70 @@ async function buildCandidate({ start, target, bearing, clockwise, profile, opti
     }
   } catch (e) { if (e.name === 'AbortError') throw e; }
 
-  return { route: best.route, vias: best.vias, bearing: b, clockwise };
+  return { route: best.route, vias: best.vias, bearing: b, clockwise, kind: 'round' };
+}
+
+function bearingDeg(a, b) {
+  const y = Math.sin((b.lon - a.lon) * RAD) * Math.cos(b.lat * RAD);
+  const x = Math.cos(a.lat * RAD) * Math.sin(b.lat * RAD) - Math.sin(a.lat * RAD) * Math.cos(b.lat * RAD) * Math.cos((b.lon - a.lon) * RAD);
+  return Math.atan2(y, x) / RAD;
+}
+
+/**
+ * Umwege von A nach B mit Wunschlänge: ein oder zwei Wegpunkte seitlich der direkten Linie,
+ * so weit ausgelenkt, dass die Route die gewünschte Länge bekommt.
+ */
+export async function generateDetours({ start, end, km, directDist, profile, options, nogos, signal, onProgress }) {
+  const target = km * 1000;
+  const d = haversine(start.lat, start.lon, end.lat, end.lon);
+  const direct = directDist || d * 1.25;
+  if (target < direct * 1.08) throw new RouteError('Die Wunschlänge ist kaum länger als der direkte Weg (' + Math.round(direct / 1000) + ' km). Gib eine größere Länge ein.');
+  const br = bearingDeg(start, end);
+  const lerp = (t) => ({ lat: start.lat + (end.lat - start.lat) * t, lon: start.lon + (end.lon - start.lon) * t });
+  const off = (r) => Math.abs(r.dist / target - 1);
+  const route = (vias) => fetchRoute({ profile, options, nogos, signal, points: [start, ...vias, end] });
+  const shapes = [{ side: 1, n: 1 }, { side: -1, n: 1 }, { side: 1, n: 2 }, { side: -1, n: 2 }];
+  let done = 0;
+
+  const build = async ({ side, n }) => {
+    const geom = (hh) => (n === 1 ? 2 * Math.hypot(d / 2, hh) : 2 * Math.hypot(d / 3, hh) + d / 3);
+    const solve = (f) => {
+      const g = target / f;
+      const v = n === 1 ? (g / 2) ** 2 - (d / 2) ** 2 : ((g - d / 3) / 2) ** 2 - (d / 3) ** 2;
+      return Math.sqrt(Math.max(0, v));
+    };
+    const viasAt = (hh, turn) => (n === 1 ? [0.5] : [1 / 3, 2 / 3]).map((t) => { const m = lerp(t); return destination(m.lat, m.lon, br + 90 * side + turn, hh); });
+    let f = Math.max(1.05, direct / Math.max(d, 1)), best = null, fails = 0, turn = 0;
+    for (let iter = 0; iter < 3; iter++) {
+      const hh = solve(f) * (1 - 0.06 * fails);
+      if (hh < 200) break;
+      const vias = viasAt(hh, turn);
+      let res;
+      try { res = await route(vias); } catch (e) {
+        if (!(e instanceof RouteError) || ++fails > 3) throw e;
+        turn += 12; iter--;
+        continue;
+      }
+      if (!best || off(res) < off(best.route)) best = { route: res, vias };
+      if (off(res) < 0.06) break;
+      f = res.dist / geom(hh);
+    }
+    if (!best) throw new RouteError('Kein Vorschlag möglich.');
+    try {
+      const fixed = fixSpurs(best.route, best.vias);
+      if (fixed.changed) { const res = await route(fixed.vias); if (off(res) < Math.max(0.12, off(best.route) + 0.03)) best = { route: res, vias: fixed.vias }; }
+    } catch (e) { if (e.name === 'AbortError') throw e; }
+    return { ...best, kind: 'detour', name: 'Umweg über ' + compassName(br + 90 * side) + (n === 2 ? ', weiter Bogen' : ''), score: -off(best.route) };
+  };
+
+  const settled = await Promise.allSettled(shapes.map((s) => build(s).finally(() => { done++; if (onProgress) onProgress(done, shapes.length); })));
+  if (signal && signal.aborted) { const e = new Error('abgebrochen'); e.name = 'AbortError'; throw e; }
+  const cands = settled.filter((s) => s.status === 'fulfilled').map((s) => s.value);
+  if (!cands.length) {
+    const first = settled.find((s) => s.status === 'rejected');
+    throw first && first.reason instanceof RouteError ? first.reason : new RouteError('Für diese Strecke wurde kein Umweg gefunden.');
+  }
+  return cands.sort((a, b) => b.score - a.score).slice(0, 3);
 }
 
 /**

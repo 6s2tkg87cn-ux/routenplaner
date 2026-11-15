@@ -20,7 +20,7 @@
     <div id="dockSlotMobile"></div>
 
     <div class="panel-scroll" id="panelScroll">
-      <header class="brand">
+      <header class="brand" id="brandBar">
         <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
           <path d="M5 23c5 0 5-6 10-6s4 5 8 5 4-12-2-13" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
           <circle cx="5" cy="23" r="3.2" fill="currentColor"/><circle cx="20.5" cy="9" r="3.2" fill="currentColor"/>
@@ -29,91 +29,129 @@
         <button id="btnNew" class="link-btn" type="button">Neue Tour</button>
       </header>
 
-      <section class="block">
+      <section class="block block-first">
         <div class="seg seg-profile" id="profileSeg" role="radiogroup" aria-label="Radtyp"></div>
         <div class="seg seg-mode" id="modeSeg" role="radiogroup" aria-label="Art der Planung"></div>
       </section>
 
-      <section class="block" aria-label="Wegpunkte">
+      <section class="block" aria-label="Planung">
         <ol id="wpList" class="wp-list"></ol>
-        <div id="routeExtras">
-          <div class="opt opt-toggle loop-row">
-            <label for="loopSwitch"><span class="opt-label">Hin und zurück</span><span class="opt-note">Die Route führt am Ende zum Start zurück. Mit weiteren Wegpunkten wird daraus eine Runde.</span></label>
+        <p class="hint" id="mapHint"></p>
+
+        <div id="routeExtras" class="mode-body">
+          <div class="row-toggle">
+            <label for="loopSwitch"><span class="opt-label">Hin und zurück</span><span class="opt-note">Die Route führt am Ende zum Start zurück.</span></label>
             <input type="checkbox" id="loopSwitch" class="switch">
           </div>
-          <div class="wp-actions">
+          <div class="btn-row">
             <button id="btnAddVia" class="ghost-btn" type="button">Wegpunkt hinzufügen</button>
             <button id="btnReverse" class="ghost-btn" type="button">Richtung umkehren</button>
           </div>
-        </div>
-        <p class="hint" id="mapHint">Tippe auf die Karte, um den Start zu setzen.</p>
-      </section>
-
-      <section class="block" id="roundBlock" hidden aria-label="Rundtour">
-        <div class="round-grid">
-          <label class="field-label" for="roundKm">Länge</label>
-          <div class="round-km">
-            <span class="speed-field"><input id="roundKm" type="number" inputmode="decimal" min="5" max="300" step="1"> km</span>
-            <div id="kmChips" class="chips"></div>
+          <div class="form-grid" id="detourRow">
+            <label class="form-label" for="detourKm">Wunschlänge</label>
+            <div class="form-field">
+              <span class="num-field"><input id="detourKm" type="number" inputmode="decimal" min="5" max="300" step="1" placeholder="–"> km</span>
+              <button id="btnDetour" class="ghost-btn" type="button">Umweg vorschlagen</button>
+            </div>
           </div>
-          <label class="field-label" for="roundDir">Richtung</label>
-          <select id="roundDir" class="select"></select>
-          <span class="field-label" id="climbLabel">Höhenmeter</span>
-          <div class="seg seg-small" id="climbSeg" role="radiogroup" aria-labelledby="climbLabel"></div>
         </div>
-        <div class="opt opt-toggle loop-row">
-          <label for="roundWind"><span class="opt-label">Wind berücksichtigen</span><span class="opt-note">Gegenwind zuerst, Rückenwind auf dem Heimweg. Gilt für die Abfahrtszeit unten.</span></label>
-          <input type="checkbox" id="roundWind" class="switch">
+
+        <div id="roundBlock" class="mode-body" hidden>
+          <div class="form-grid">
+            <label class="form-label" for="roundKm">Länge</label>
+            <div class="form-field">
+              <span class="num-field"><input id="roundKm" type="number" inputmode="decimal" min="5" max="300" step="1"> km</span>
+              <div id="kmChips" class="chips"></div>
+            </div>
+            <label class="form-label" for="roundDir">Richtung</label>
+            <select id="roundDir" class="select"></select>
+            <span class="form-label" id="climbLabel">Höhenmeter</span>
+            <div class="seg seg-small" id="climbSeg" role="radiogroup" aria-labelledby="climbLabel"></div>
+          </div>
+          <div class="row-toggle">
+            <label for="roundWind"><span class="opt-label">Wind berücksichtigen</span><span class="opt-note">Gegenwind zuerst, Rückenwind auf dem Heimweg.</span></label>
+            <input type="checkbox" id="roundWind" class="switch">
+          </div>
+          <button id="btnRound" class="primary-btn wide" type="button">Rundtour vorschlagen</button>
         </div>
-        <button id="btnRound" class="primary-btn wide" type="button">Rundtour vorschlagen</button>
         <p class="hint" id="roundStatus" hidden></p>
-        <p class="hint">Radtyp und Optionen unten gelten auch für die Rundtour, zum Beispiel viel Wald oder kaum Autoverkehr.</p>
-        <div id="candWrap" hidden>
-          <h2 class="cand-head">Vorschläge</h2>
-          <ul id="candList" class="cand-list"></ul>
-          <button id="btnEditWp" class="link-btn" type="button">Wegpunkte dieser Runde bearbeiten</button>
-        </div>
       </section>
 
-      <section class="block" id="wxBlock" aria-label="Abfahrt und Wetter">
-        <h2>Abfahrt und Wetter</h2>
-        <div class="wx-when">
-          <select id="wxDay" class="select" aria-label="Tag der Abfahrt"></select>
-          <input id="wxTime" class="text-input" type="time" step="900" aria-label="Uhrzeit der Abfahrt">
-        </div>
-        <div id="wxBody" class="wx-body"></div>
+      <section class="block" id="candWrap" hidden>
+        <h2>Vorschläge</h2>
+        <ul id="candList" class="cand-list"></ul>
+        <button id="btnEditWp" class="link-btn" type="button">Wegpunkte bearbeiten</button>
       </section>
 
-      <details class="block fold" id="optFold" open>
-        <summary><span>Optionen</span><button id="btnResetOpt" class="link-btn" type="button">Zurücksetzen</button></summary>
-        <div id="optList" class="opt-list"></div>
-        <p class="hint">Verkehr, Wald und Ortschaften sind Schätzwerte aus OpenStreetMap, keine Live-Messung.</p>
+      <details class="block fold" data-fold="wx" open>
+        <summary><span>Abfahrt und Wetter</span></summary>
+        <div class="fold-body">
+          <div class="wx-when">
+            <select id="wxDay" class="select" aria-label="Tag der Abfahrt"></select>
+            <input id="wxTime" class="text-input" type="time" step="900" aria-label="Uhrzeit der Abfahrt">
+          </div>
+          <div id="wxBody" class="wx-body"></div>
+          <div class="row-toggle" id="wxMapRow">
+            <label for="wxMap"><span class="opt-label">Wind auf der Karte zeigen</span></label>
+            <input type="checkbox" id="wxMap" class="switch">
+          </div>
+        </div>
       </details>
 
-      <section class="block" id="nogoBlock" hidden>
-        <h2>Sperrzonen</h2>
-        <ul id="nogoList" class="nogo-list"></ul>
-      </section>
-
-      <section class="block" id="tourBlock" hidden>
-        <h2>Tour</h2>
-        <label class="field-label" for="tourName">Name</label>
-        <input id="tourName" class="text-input" type="text" autocomplete="off" placeholder="Name der Tour">
-        <div id="composition"></div>
-        <div class="export-row">
-          <button id="btnGpx" class="primary-btn" type="button">GPX herunterladen</button>
-          <button id="btnShare" class="ghost-btn" type="button" hidden>GPX teilen</button>
+      <details class="block fold" data-fold="opt" open>
+        <summary><span>Optionen</span><button id="btnResetOpt" class="link-btn" type="button">Zurücksetzen</button></summary>
+        <div class="fold-body">
+          <div id="optList" class="opt-list"></div>
+          <p class="hint">Verkehr, Wald und Ortschaften sind Schätzwerte aus OpenStreetMap, keine Live-Messung.</p>
         </div>
-        <p class="hint">Die GPX-Datei kannst du in Garmin Connect importieren oder direkt auf den Edge kopieren.</p>
-      </section>
+      </details>
 
-      <section class="block">
-        <h2>Mein Tempo</h2>
-        <div class="speed-row">
-          <label for="speedInput" id="speedLabel">Durchschnitt mit dem Rennrad</label>
-          <span class="speed-field"><input id="speedInput" type="number" inputmode="decimal" min="5" max="60" step="0.5"> km/h</span>
+      <details class="block fold" id="nogoBlock" data-fold="nogo" open hidden>
+        <summary><span>Sperrzonen</span></summary>
+        <div class="fold-body"><ul id="nogoList" class="nogo-list"></ul></div>
+      </details>
+
+      <details class="block fold" id="tourBlock" data-fold="tour" open hidden>
+        <summary><span>Tour</span></summary>
+        <div class="fold-body">
+          <label class="field-label" for="tourName">Name</label>
+          <input id="tourName" class="text-input" type="text" autocomplete="off" placeholder="Name der Tour">
+          <div id="composition"></div>
+          <div class="comp">
+            <h3>Stopps an der Strecke</h3>
+            <div id="poiChips" class="chips"></div>
+            <p class="hint" id="poiStatus" hidden></p>
+          </div>
+          <div class="btn-row btn-row-top">
+            <button id="btnGpx" class="primary-btn" type="button">GPX herunterladen</button>
+            <button id="btnShare" class="ghost-btn" type="button" hidden>Teilen</button>
+            <button id="btnSave" class="ghost-btn" type="button">Tour speichern</button>
+          </div>
+          <p class="hint" id="gpxHint">Die GPX-Datei kannst du in Garmin Connect importieren oder direkt auf den Edge kopieren.</p>
         </div>
-      </section>
+      </details>
+
+      <details class="block fold" data-fold="tours">
+        <summary><span>Meine Touren</span></summary>
+        <div class="fold-body">
+          <ul id="tourList" class="tour-list"></ul>
+          <p class="hint" id="tourEmpty">Noch keine Tour gespeichert. Gespeicherte Touren bleiben auf diesem Gerät.</p>
+          <div class="btn-row btn-row-top">
+            <button id="btnImport" class="ghost-btn" type="button">GPX importieren</button>
+            <input id="gpxFile" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml" hidden>
+          </div>
+        </div>
+      </details>
+
+      <details class="block fold" data-fold="set">
+        <summary><span>Mein Tempo</span></summary>
+        <div class="fold-body">
+          <div class="form-grid form-grid-wide">
+            <label class="form-label" for="speedInput" id="speedLabel">Durchschnitt mit dem Rennrad</label>
+            <span class="num-field"><input id="speedInput" type="number" inputmode="decimal" min="5" max="60" step="0.5"> km/h</span>
+          </div>
+        </div>
+      </details>
 
       <footer class="credits">
         Routing: <a href="https://brouter.de" target="_blank" rel="noopener">BRouter</a>.
@@ -136,6 +174,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
       </button>
     </div>
+    <div id="windBadge" class="wind-badge" hidden></div>
     <div id="toast" class="toast" role="status" hidden></div>
     <div id="dockSlotDesktop"></div>
   </main>

@@ -1,10 +1,11 @@
 /* global maplibregl */
 import {
-  PROFILES, DEFAULT_OPTIONS, fetchRoute, RouteError, nearestIndex, toGpx,
+  PROFILES, DEFAULT_OPTIONS, fetchRoute, RouteError, nearestIndex, pointAt, toGpx, parseGpx, simplifyTrack,
   SURFACES, SURFACE_LABEL, WAYS, WAY_LABEL,
 } from './routing.js';
 import { createProfileChart } from './elevation.js';
-import { generateRoundTrips } from './roundtrip.js';
+import { generateRoundTrips, generateDetours } from './roundtrip.js';
+import { POI_CATS, fetchPois, PoiError } from './pois.js';
 import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
@@ -38,6 +39,10 @@ const state = {
   loop: false,
   round: { km: 50, dir: 'any', climb: 'any', wind: true },
   departTime: '',
+  windOnMap: true,
+  poiCats: [],
+  folds: {},
+  detourKm: '',
   waypoints: [emptyWp(), emptyWp()],
   nogos: [],
   favorites: [],
@@ -59,6 +64,10 @@ function load() {
     state.loop = !!s.loop;
     if (s.round) state.round = { ...state.round, ...s.round };
     if (typeof s.departTime === 'string') state.departTime = s.departTime;
+    if (typeof s.windOnMap === 'boolean') state.windOnMap = s.windOnMap;
+    if (Array.isArray(s.poiCats)) state.poiCats = s.poiCats.filter((c) => POI_CATS[c]);
+    if (s.folds && typeof s.folds === 'object') state.folds = s.folds;
+    if (s.detourKm) state.detourKm = s.detourKm;
     if (Array.isArray(s.waypoints) && s.waypoints.length >= 2) state.waypoints = s.waypoints.map((w) => ({ ...emptyWp(), ...w, id: uid() }));
     if (Array.isArray(s.nogos)) state.nogos = s.nogos.map((n) => ({ ...n, id: uid() }));
     if (Array.isArray(s.favorites)) state.favorites = s.favorites;
@@ -189,7 +198,7 @@ function toggleLayerMenu(open) {
 
 // Freie Kartenfläche neben Seitenleiste, Ergebnisleiste oder Bottom-Sheet
 function fitPadding() {
-  if (isMobile()) return { top: 70, left: 40, right: 40, bottom: $('panel').offsetHeight + 30 };
+  if (isMobile()) return { top: 70, left: 40, right: 40, bottom: sheetVisible() + 30 };
   const dockH = $('dock').hidden ? 0 : $('dock').offsetHeight;
   return { top: 50, left: 70, right: 70, bottom: dockH + 60 };
 }
@@ -395,6 +404,7 @@ function attachAutocomplete(input, drop, index) {
   const choose = (it) => {
     close();
     input.blur();
+    if (isMobile()) setSheet('half');
     if (it.locate) return locate(index);
     fitNext = true;
     setWaypoint(index, it.lat, it.lon, it.short || it.main);
@@ -448,17 +458,44 @@ function attachAutocomplete(input, drop, index) {
   });
 }
 
+// Eigener Standort: blauer Punkt auf der Karte, der sich mitbewegt
+let meMarker = null, watchId = null, lastPos = null;
+
+function showMe(pos) {
+  lastPos = { lat: pos.coords.latitude, lon: pos.coords.longitude, at: Date.now() };
+  if (!meMarker) meMarker = new maplibregl.Marker({ element: h('div', { class: 'me-dot', title: 'Mein Standort' }) }).setLngLat([lastPos.lon, lastPos.lat]).addTo(map);
+  else meMarker.setLngLat([lastPos.lon, lastPos.lat]);
+}
+
+function startWatch(center) {
+  if (!navigator.geolocation) { if (center) toast('Dieser Browser kann den Standort nicht bestimmen.'); return; }
+  const go = () => map.easeTo({ center: [lastPos.lon, lastPos.lat], zoom: Math.max(map.getZoom(), 14) });
+  if (watchId != null) { if (center && lastPos) go(); return; }
+  if (center) toast('Standort wird bestimmt …');
+  watchId = navigator.geolocation.watchPosition((pos) => {
+    showMe(pos);
+    if (center) { center = false; hideToast(); go(); }
+  }, () => {
+    if (center) toast('Der Standort ist nicht verfügbar. Erlaube den Zugriff in den Einstellungen des Browsers.');
+    center = false;
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
+}
+
 function locate(index) {
+  if (index == null) return startWatch(true);
   if (!navigator.geolocation) return toast('Dieser Browser kann den Standort nicht bestimmen.');
-  toast('Standort wird bestimmt …');
-  navigator.geolocation.getCurrentPosition((pos) => {
-    const { latitude, longitude } = pos.coords;
-    if (index == null) { map.easeTo({ center: [longitude, latitude], zoom: Math.max(map.getZoom(), 14) }); hideToast(); return; }
+  const use = (lat, lon) => {
     hideToast();
-    if (state.mode === 'round' || state.waypoints.filter((w) => w.lat != null).length === 0) map.easeTo({ center: [longitude, latitude], zoom: Math.max(map.getZoom(), 13) });
+    if (state.mode === 'round' || state.waypoints.filter((w) => w.lat != null).length === 0) map.easeTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 13) });
     else fitNext = true;
-    setWaypoint(index, latitude, longitude, null);
-  }, () => toast('Der Standort ist nicht verfügbar. Erlaube den Zugriff in den Browser-Einstellungen.'), { enableHighAccuracy: true, timeout: 10000 });
+    setWaypoint(index, lat, lon, null);
+  };
+  if (lastPos && Date.now() - lastPos.at < 30000) { use(lastPos.lat, lastPos.lon); startWatch(false); return; }
+  toast('Standort wird bestimmt …');
+  navigator.geolocation.getCurrentPosition((pos) => { showMe(pos); use(pos.coords.latitude, pos.coords.longitude); startWatch(false); },
+    () => toast('Der Standort ist nicht verfügbar. Erlaube den Zugriff in den Einstellungen des Browsers.'), { enableHighAccuracy: true, timeout: 12000 });
 }
 
 // ---------------------------------------------------------------- Sperrzonen
@@ -500,29 +537,32 @@ function renderNogos() {
 // ---------------------------------------------------------------- Optionen
 
 const STEP3 = ['egal', 'gern', 'möglichst viel'];
+// Reihenfolge ist für alle Radtypen gleich: erst die gemeinsamen Optionen, dann die speziellen.
 const OPTION_DEFS = [
   { key: 'traffic', label: 'Autoverkehr', steps: ['egal', 'normal', 'wenig', 'kaum'] },
   { key: 'elevation', label: 'Höhenmeter', steps: [['flat', 'flach halten'], ['balanced', 'ausgewogen'], ['nosteep', 'Rampen meiden']] },
   { key: 'forest', label: 'Wald', steps: STEP3 },
   { key: 'river', label: 'Flüsse und Seen', steps: STEP3 },
   { key: 'town', label: 'Ortschaften', steps: ['egal', 'eher meiden', 'umfahren'] },
-  { key: 'preferUnpaved', label: 'Schotterwege bevorzugen', only: ['gravel'] },
-  { key: 'trails', label: 'Pfade und Trails erlauben', note: 'Auch schmale, verwurzelte Wege.', only: ['gravel'] },
-  { key: 'wet', label: 'Nasse Verhältnisse', note: 'Meidet Wege, die bei Nässe schmierig werden.', only: ['gravel'] },
+  { key: 'noMain', label: 'Bundesstraßen meiden' },
+  { key: 'ferries', label: 'Fähren erlauben' },
   { key: 'cycleways', label: 'Radwege mitnutzen', only: ['rennrad'] },
   { key: 'cobble', label: 'Kopfsteinpflaster meiden', only: ['rennrad'] },
   { key: 'strictPaved', label: 'Schotter strikt ausschließen', note: 'Sonst sind kurze Stücke erlaubt, wenn sie einen großen Umweg sparen.', only: ['rennrad'] },
+  { key: 'preferUnpaved', label: 'Schotterwege bevorzugen', only: ['gravel'] },
+  { key: 'trails', label: 'Pfade und Trails erlauben', note: 'Auch schmale, verwurzelte Wege.', only: ['gravel'] },
+  { key: 'wet', label: 'Nasse Verhältnisse', note: 'Meidet Wege, die bei Nässe schmierig werden.', only: ['gravel'] },
   { key: 'cycleRoutes', label: 'Ausgeschilderten Radrouten folgen', only: ['gravel', 'alltag'] },
-  { key: 'noMain', label: 'Bundesstraßen meiden' },
-  { key: 'ferries', label: 'Fähren erlauben' },
 ];
 
 function renderOptions() {
   const o = state.options[state.profile];
   const list = $('optList');
   list.replaceChildren();
+  let special = false;
   for (const def of OPTION_DEFS) {
     if (def.only && !def.only.includes(state.profile)) continue;
+    if (def.only && !special) { special = true; list.append(h('h3', { class: 'opt-group', text: 'Nur für ' + PROFILES[state.profile].label })); }
     if (def.steps) {
       const seg = h('div', { class: 'seg seg-small', role: 'radiogroup', 'aria-label': def.label });
       def.steps.forEach((s, i) => {
@@ -610,7 +650,7 @@ function showRoute() {
   $('tourBlock').hidden = !has;
   document.body.classList.toggle('has-route', has);
   setOverlay('route', has ? { type: 'FeatureCollection', features: [lineFeature(route)] } : EMPTY);
-  if (!has) { chart.setRoute(null); placeDock(); scheduleWeather(); return; }
+  if (!has) { chart.setRoute(null); placeDock(); scheduleWeather(); schedulePois(); return; }
 
   $('stDist').innerHTML = `${fmt(route.dist / 1000, route.dist < 100000 ? 1 : 0)}<small> km</small>`;
   $('stUp').innerHTML = route.hasEle ? `${fmt(route.ascent)}<small> m</small>` : '–';
@@ -622,14 +662,16 @@ function showRoute() {
   placeDock();
   chart.setRoute(route);
   scheduleWeather();
+  schedulePois();
 
   if (!state.tourName) $('tourName').placeholder = defaultTourName();
+  if (isMobile()) setSheet(sheetMode);
   if (fitNext) {
     fitNext = false;
     const mobile = isMobile(), r = route;
-    if (mobile && state.mode === 'route') setSheet('peek');
-    // mobil erst nach dem Einfahren des Sheets einpassen
-    setTimeout(() => fitRoute(r), mobile ? 260 : 30);
+    if (mobile && state.mode === 'route' && !cands.length) setSheet('peek');
+    else if (mobile) setSheet(sheetMode);
+    setTimeout(() => fitRoute(r), 30);
   }
 }
 
@@ -689,38 +731,45 @@ function clearCandidates() {
 
 function setRoundBusy(on, text) {
   $('btnRound').disabled = on;
-  $('btnRound').textContent = on ? 'Wird berechnet …' : (cands.length ? 'Neue Vorschläge' : 'Rundtour vorschlagen');
+  $('btnDetour').disabled = on;
+  $('btnRound').textContent = on ? 'Wird berechnet …' : (cands.length && cands[0].kind === 'round' ? 'Neue Vorschläge' : 'Rundtour vorschlagen');
   $('roundStatus').hidden = !text;
   $('roundStatus').textContent = text || '';
 }
 
-async function runRoundTrip() {
-  const start = state.waypoints[0];
+async function runProposals(kind) {
+  const start = state.waypoints[0], end = state.waypoints[state.waypoints.length - 1];
   if (start.lat == null) return toast('Wähle zuerst einen Startpunkt.');
-  const km = state.round.km;
+  const km = kind === 'round' ? state.round.km : parseFloat($('detourKm').value);
   if (!(km >= 5 && km <= 300)) return toast('Gib eine Länge zwischen 5 und 300 km ein.');
+  if (kind === 'detour' && (state.loop || end.lat == null)) return toast('Für einen Umweg brauchst du Start und Ziel, ohne „Hin und zurück“.');
+  const from = { lat: start.lat, lon: start.lon }, to = kind === 'detour' ? { lat: end.lat, lon: end.lon, label: end.label } : null;
+  const directDist = kind === 'detour' && route && state.waypoints.filter((w) => w.lat != null).length === 2 ? route.dist : 0;
   clearCandidates();
   if (routeCtrl) routeCtrl.abort();
   roundCtrl = new AbortController();
   const ctrl = roundCtrl;
-  setRoundBusy(true, 'Die App probiert mehrere Richtungen aus. Das dauert einen Moment.');
+  setRoundBusy(true, 'Die App probiert mehrere Möglichkeiten aus. Das dauert einen Moment.');
   $('busy').hidden = false;
   try {
-    let wind = null;
-    if (state.round.wind) {
-      // Wind am Start zur Abfahrtszeit; ohne Wetterdaten wird die Runde trotzdem berechnet
-      try {
-        const fc = await fetchForecast([{ lat: start.lat, lon: start.lon }], ctrl.signal);
-        const w = weatherAt(fc[0], departUnix());
-        if (w && w.wind != null) wind = { from: w.wdir, speed: w.wind };
-      } catch (e) { if (e.name === 'AbortError') throw e; }
+    const common = { profile: state.profile, options: state.options[state.profile], nogos: state.nogos, signal: ctrl.signal, km,
+      onProgress: (done, total) => { if (ctrl === roundCtrl) setRoundBusy(true, `${done} von ${total} Möglichkeiten berechnet …`); } };
+    let res;
+    if (kind === 'round') {
+      let wind = null;
+      if (state.round.wind) {
+        // Wind am Start zur Abfahrtszeit; ohne Wetterdaten wird die Runde trotzdem berechnet
+        try {
+          const fc = await fetchForecast([from], ctrl.signal);
+          const w = weatherAt(fc[0], departUnix());
+          if (w && w.wind != null) wind = { from: w.wdir, speed: w.wind };
+        } catch (e) { if (e.name === 'AbortError') throw e; }
+      }
+      res = await generateRoundTrips({ ...common, start: from, climb: state.round.climb, wind, direction: state.round.dir === 'any' ? null : +state.round.dir });
+    } else {
+      res = await generateDetours({ ...common, start: from, end: to, directDist });
+      res.forEach((c) => { c.end = to; });
     }
-    const res = await generateRoundTrips({
-      start: { lat: start.lat, lon: start.lon }, km, climb: state.round.climb,
-      direction: state.round.dir === 'any' ? null : +state.round.dir,
-      profile: state.profile, options: state.options[state.profile], nogos: state.nogos, signal: ctrl.signal, wind,
-      onProgress: (done, total) => { if (ctrl === roundCtrl) setRoundBusy(true, `${done} von ${total} Richtungen berechnet …`); },
-    });
     if (ctrl !== roundCtrl) return;
     roundCtrl = null;
     cands = res;
@@ -731,10 +780,9 @@ async function runRoundTrip() {
     if (e.name === 'AbortError' || ctrl !== roundCtrl) return;
     roundCtrl = null;
     setRoundBusy(false);
-    toast(e instanceof RouteError ? e.message : 'Die Rundtour konnte nicht berechnet werden.', true);
+    toast(e instanceof RouteError ? e.message : 'Die Vorschläge konnten nicht berechnet werden.', true);
     if (!(e instanceof RouteError)) console.error(e);
   } finally {
-    if (!roundCtrl && !routeCtrl) $('busy').hidden = true;
     if (!roundCtrl) $('busy').hidden = true;
   }
 }
@@ -747,7 +795,8 @@ function applyCandidate(i) {
   candSel = i;
   const start = state.waypoints[0];
   state.waypoints = [start, ...c.vias.map((v, k) => ({ id: uid(), lat: v.lat, lon: v.lon, label: 'Wegpunkt ' + (k + 1) }))];
-  state.loop = true;
+  if (c.kind === 'detour') state.waypoints.push({ id: uid(), lat: c.end.lat, lon: c.end.lon, label: c.end.label });
+  state.loop = c.kind !== 'detour';
   alt = 0;
   if (routeCtrl) { routeCtrl.abort(); routeCtrl = null; }
   clearTimeout(routeTimer);
@@ -764,8 +813,9 @@ function renderCandidates() {
   list.replaceChildren();
   $('candWrap').hidden = cands.length === 0;
   setOverlay('cands', { type: 'FeatureCollection', features: cands.map((c, i) => (i === candSel ? null : lineFeature(c.route, { i }))).filter(Boolean) });
-  if (!cands.length) { $('btnRound').textContent = 'Rundtour vorschlagen'; return; }
-  $('btnRound').textContent = 'Neue Vorschläge';
+  $('btnRound').textContent = cands.length && cands[0].kind === 'round' ? 'Neue Vorschläge' : 'Rundtour vorschlagen';
+  $('btnEditWp').hidden = state.mode === 'route';
+  if (!cands.length) return;
   const perKm = cands.map((c) => c.route.ascent / c.route.dist);
   const flat = perKm.indexOf(Math.min(...perKm)), hilly = perKm.indexOf(Math.max(...perKm));
   cands.forEach((c, i) => {
@@ -792,6 +842,7 @@ function renderMode() {
   document.body.dataset.mode = state.mode;
   $('roundBlock').hidden = state.mode !== 'round';
   $('routeExtras').hidden = state.mode !== 'route';
+  $('btnEditWp').hidden = state.mode === 'route';
 }
 
 function initRound() {
@@ -820,7 +871,10 @@ function initRound() {
       'aria-checked': String(state.round.climb === v), text: label, onclick: () => { state.round.climb = v; save(); renderClimb(); } })));
   };
   renderClimb();
-  $('btnRound').addEventListener('click', runRoundTrip);
+  $('btnRound').addEventListener('click', () => runProposals('round'));
+  $('btnDetour').addEventListener('click', () => runProposals('detour'));
+  $('detourKm').value = state.detourKm;
+  $('detourKm').addEventListener('change', () => { state.detourKm = $('detourKm').value; save(); });
   $('btnEditWp').addEventListener('click', () => { state.mode = 'route'; save(); renderMode(); renderWaypoints(); });
   $('roundWind').checked = state.round.wind;
   $('roundWind').addEventListener('change', () => { state.round.wind = $('roundWind').checked; save(); });
@@ -870,7 +924,10 @@ function initWeather() {
   const next = new Date(Date.now() + 3600 * 1000);
   time.value = state.departTime || String(Math.min(20, Math.max(6, next.getHours()))).padStart(2, '0') + ':00';
   time.addEventListener('change', () => { if (time.value) { state.departTime = time.value; save(); scheduleWeather(); } });
+  $('wxMap').checked = state.windOnMap;
+  $('wxMap').addEventListener('change', () => { state.windOnMap = $('wxMap').checked; save(); renderWindMap(); });
   renderWeather(null);
+  renderWindMap(null);
 }
 
 function scheduleWeather() {
@@ -880,7 +937,7 @@ function scheduleWeather() {
 
 async function updateWeather() {
   if (wxCtrl) wxCtrl.abort();
-  if (!route) { chart.setWind(null); return renderWeather(null); }
+  if (!route) { chart.setWind(null); renderWindMap(null); return renderWeather(null); }
   wxCtrl = new AbortController();
   const ctrl = wxCtrl, r = route;
   if (!$('wxBody').dataset.filled) renderWeather(null, 'Wetter wird geladen …');
@@ -890,17 +947,43 @@ async function updateWeather() {
     if (ctrl !== wxCtrl || r !== route) return;
     const start = departUnix(), speed = state.speeds[state.profile];
     const a = analyze(r, samples, fcs, start, speed);
-    if (!a) { chart.setWind(null); return renderWeather(null, 'Für diesen Zeitpunkt gibt es keine Vorhersage. Wähle eine Abfahrt in den nächsten sieben Tagen.'); }
+    if (!a) { chart.setWind(null); renderWindMap(null); return renderWeather(null, 'Für diesen Zeitpunkt gibt es keine Vorhersage. Wähle eine Abfahrt in den nächsten sieben Tagen.'); }
     const closed = state.loop || Math.hypot(r.lat[0] - r.lat[r.n - 1], r.lon[0] - r.lon[r.n - 1]) < 0.003;
     const rev = closed ? analyze(r, samples, fcs, start, speed, true) : null;
     const best = bestStart(r, samples, fcs, dayStartUnix(), speed);
     chart.setWind(a.bins);
     renderWeather({ a, rev, best, closed });
+    renderWindMap(a, r);
   } catch (e) {
     if (e.name === 'AbortError') return;
     chart.setWind(null);
+    renderWindMap(null);
     renderWeather(null, e instanceof WeatherError ? e.message : 'Das Wetter konnte nicht ausgewertet werden.');
     if (!(e instanceof WeatherError)) console.error(e);
+  }
+}
+
+// Wind auf der Karte: Pfeile entlang der Route (Farbe = Gegen-, Seiten- oder Rückenwind) und ein Hinweis oben
+let windMarkers = [], lastWind = null;
+function renderWindMap(a, r) {
+  if (a !== undefined) lastWind = a ? { a, r } : null;
+  windMarkers.forEach((m) => m.remove());
+  windMarkers = [];
+  const badge = $('windBadge');
+  $('wxMapRow').hidden = !lastWind;
+  if (!lastWind || !state.windOnMap || lastWind.r !== route) { badge.hidden = true; return; }
+  const { a: an, r: rt } = lastWind;
+  badge.replaceChildren(windArrow(an.wdir), h('span', {}, h('b', { text: fmt(an.wind) + ' km/h' }), ' aus ' + compass(an.wdir)));
+  badge.hidden = false;
+  if (an.wind < 4) return;
+  const n = Math.max(3, Math.min(14, Math.round(rt.dist / 5000)));
+  for (let i = 0; i < n; i++) {
+    const d = ((i + 0.5) / n) * rt.dist, p = pointAt(rt, d);
+    const b = an.bins.find((k) => d >= k.from && d <= k.to);
+    if (!b) continue;
+    const name = b.cls === 'head' ? 'Gegenwind' : b.cls === 'tail' ? 'Rückenwind' : 'Seitenwind';
+    const elm = h('div', { class: 'wind-pin wind-pin-' + b.cls, title: `${name}, ${fmt(b.wind)} km/h` }, windArrow(b.wdir));
+    windMarkers.push(new maplibregl.Marker({ element: elm }).setLngLat([p.lon, p.lat]).addTo(map));
   }
 }
 
@@ -963,19 +1046,9 @@ function renderWeather(w, note) {
   if (a.sunset && a.end > a.sunset - 900 && a.start < a.sunset) hint(`Sonnenuntergang um ${clock(a.sunset)} Uhr, Ankunft gegen ${clock(a.end)} Uhr. Nimm Licht mit.`, { warn: true });
   else if (a.night) hint('Ein Teil der Fahrt liegt im Dunkeln. Nimm Licht mit.', { warn: true });
 
-  // Verlauf entlang der Strecke
-  const table = h('table', { class: 'wx-table' }, h('thead', {}, h('tr', {},
-    h('th', { text: 'km' }), h('th', { text: 'Uhrzeit' }), h('th', { text: '°C' }), h('th', { text: 'Regen' }), h('th', { text: 'Wind' }), h('th', { text: '' }))));
-  const tb = h('tbody', {});
-  for (const r of a.rows) {
-    tb.append(h('tr', {}, h('td', { text: fmt(r.d / 1000) }), h('td', { text: clock(r.t) }), h('td', { text: fmt(r.temp) }),
-      h('td', { text: fmt(r.pprob || 0) + ' %' }), h('td', {}, windArrow(r.wdir), fmt(r.wind) + ' km/h'), h('td', { class: 'rel', text: r.rel })));
-  }
-  table.append(tb);
-
   body.append(lead, facts);
   if (hints.children.length) body.append(hints);
-  body.append(share, table);
+  body.append(share);
 }
 
 // ---------------------------------------------------------------- Export
@@ -989,13 +1062,37 @@ function defaultTourName() {
   return (state.loop || a === b ? 'Runde ab ' + a : a + ' – ' + b) + km;
 }
 
-function gpxFile() {
+// Stand der Planung, mit dem sich eine Tour später genau wiederherstellen lässt
+function snapshot() {
+  return {
+    profile: state.profile, options: state.options[state.profile], loop: state.loop,
+    waypoints: state.waypoints.filter((w) => w.lat != null).map((w) => ({ lat: +w.lat.toFixed(6), lon: +w.lon.toFixed(6), label: w.label })),
+    nogos: state.nogos.map((n) => ({ lat: n.lat, lon: n.lon, radius: n.radius })),
+  };
+}
+
+function restore(plan, name) {
+  if (!plan || !Array.isArray(plan.waypoints) || plan.waypoints.length < 1) return toast('Diese Tour lässt sich nicht laden.', true);
+  if (PROFILES[plan.profile]) { state.profile = plan.profile; state.options[plan.profile] = { ...DEFAULT_OPTIONS[plan.profile], ...plan.options }; }
+  state.waypoints = plan.waypoints.map((w) => ({ id: uid(), lat: w.lat, lon: w.lon, label: w.label || fmt(w.lat, 5) + ', ' + fmt(w.lon, 5) }));
+  if (state.waypoints.length < 2) state.waypoints.push(emptyWp());
+  state.loop = !!plan.loop;
+  state.nogos = (plan.nogos || []).map((n) => ({ ...n, id: uid() }));
+  state.mode = 'route';
+  state.tourName = name || '';
+  $('tourName').value = state.tourName;
+  fitNext = true;
+  renderProfile(); renderOptions(); renderMode(); renderLoop(); renderWaypoints(); renderNogos();
+  changed();
+}
+
+function gpxFile(type = 'application/gpx+xml') {
   const name = state.tourName.trim() || defaultTourName();
   // Dateiname ohne Umlaute und Sonderzeichen, damit ihn auch Garmin-Geräte sauber anzeigen
   const map = { ä: 'ae', ö: 'oe', ü: 'ue', Ä: 'Ae', Ö: 'Oe', Ü: 'Ue', ß: 'ss' };
   const safe = name.replace(/[äöüÄÖÜß]/g, (c) => map[c]).normalize('NFD').replace(/[^A-Za-z0-9 _-]+/g, '')
     .trim().replace(/\s+/g, '_') || 'Tour';
-  return new File([toGpx(route, name)], safe + '.gpx', { type: 'application/gpx+xml' });
+  return new File([toGpx(route, name, snapshot())], safe + '.gpx', { type });
 }
 
 function downloadGpx() {
@@ -1008,10 +1105,117 @@ function downloadGpx() {
   toast('GPX heruntergeladen: ' + file.name);
 }
 
+// Teilen: Als allgemeine Datei übergeben, damit das Handy die Apps nach der Endung .gpx auswählt
+// (so erscheint z. B. Garmin Connect eher in der Liste als beim Typ "GPX").
+function shareFile() {
+  for (const type of ['application/octet-stream', 'application/gpx+xml']) {
+    const file = gpxFile(type);
+    if (navigator.canShare && navigator.canShare({ files: [file] })) return file;
+  }
+  return null;
+}
 async function shareGpx() {
   if (!route) return;
-  const file = gpxFile();
-  try { await navigator.share({ files: [file], title: file.name }); } catch (e) { if (e.name !== 'AbortError') downloadGpx(); }
+  const file = shareFile();
+  if (!file) return downloadGpx();
+  try { await navigator.share({ files: [file] }); } catch (e) { if (e.name !== 'AbortError') downloadGpx(); }
+}
+
+// ---------------------------------------------------------------- Meine Touren
+
+const TOURS_KEY = 'rueckenwind.tours';
+function loadTours() { try { return JSON.parse(localStorage.getItem(TOURS_KEY) || '[]'); } catch (e) { return []; } }
+function storeTours(list) { try { localStorage.setItem(TOURS_KEY, JSON.stringify(list)); } catch (e) { toast('Die Tour konnte nicht gespeichert werden.', true); } }
+
+function saveTour() {
+  if (!route) return;
+  const name = state.tourName.trim() || defaultTourName();
+  const list = loadTours().filter((t) => t.name !== name);
+  list.unshift({ id: uid(), name, date: Date.now(), dist: route.dist, ascent: route.ascent, plan: snapshot() });
+  storeTours(list);
+  renderTours();
+  toast('Tour gespeichert: ' + name);
+}
+
+function renderTours() {
+  const list = loadTours(), ul = $('tourList');
+  ul.replaceChildren();
+  $('tourEmpty').hidden = list.length > 0;
+  for (const t of list) {
+    ul.append(h('li', {},
+      h('button', { type: 'button', class: 'tour-item', onclick: () => { restore(t.plan, t.name); if (isMobile()) setSheet('half'); } },
+        h('span', { class: 'tour-name', text: t.name }),
+        h('span', { class: 'tour-meta', text: `${fmt(t.dist / 1000)} km, ${fmt(t.ascent)} hm, ${PROFILES[t.plan.profile] ? PROFILES[t.plan.profile].label : ''}, ${new Date(t.date).toLocaleDateString('de-DE')}` })),
+      h('button', { class: 'icon-btn', type: 'button', title: 'Löschen', 'aria-label': t.name + ' löschen',
+        onclick: () => { storeTours(loadTours().filter((x) => x.id !== t.id)); renderTours(); } }, icon('x'))));
+  }
+}
+
+async function importGpx(file) {
+  try {
+    const g = parseGpx(await file.text());
+    if (g.plan) { restore(g.plan, g.name); return toast('Tour geladen: ' + (g.name || file.name)); }
+    // Fremde GPX-Datei: Strecke über wenige Stützpunkte mit dem aktuellen Radtyp nachbauen
+    const pts = g.points, a = pts[0], b = pts[pts.length - 1];
+    const closed = Math.hypot(a.lat - b.lat, (a.lon - b.lon) * Math.cos(a.lat * Math.PI / 180)) < 0.003;
+    let keep = simplifyTrack(pts, 14);
+    if (closed) keep = keep.slice(0, -1);
+    restore({ profile: state.profile, options: state.options[state.profile], loop: closed, nogos: [],
+      waypoints: keep.map((q, i) => ({ lat: q.lat, lon: q.lon, label: i === 0 ? 'Start aus GPX' : 'Wegpunkt ' + i })) }, g.name);
+    toast('Strecke aus der GPX-Datei nachgebaut. Sie kann leicht vom Original abweichen.');
+  } catch (e) {
+    toast(e instanceof RouteError ? e.message : 'Die Datei konnte nicht gelesen werden.', true);
+  }
+}
+
+// ---------------------------------------------------------------- Stopps an der Strecke
+
+let poiMarkers = [], poiCtrl = null, poiTimer = 0;
+
+function renderPoiChips() {
+  $('poiChips').replaceChildren(...Object.entries(POI_CATS).map(([key, c]) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(state.poiCats.includes(key)),
+    text: c.icon + ' ' + c.label, onclick: () => {
+      state.poiCats = state.poiCats.includes(key) ? state.poiCats.filter((k) => k !== key) : [...state.poiCats, key];
+      save(); renderPoiChips(); schedulePois(100);
+    } })));
+}
+
+function schedulePois(delay = 900) {
+  clearTimeout(poiTimer);
+  poiTimer = setTimeout(updatePois, delay);
+}
+
+async function updatePois() {
+  if (poiCtrl) poiCtrl.abort();
+  poiMarkers.forEach((m) => m.remove());
+  poiMarkers = [];
+  const status = $('poiStatus');
+  status.hidden = true;
+  if (!route || !state.poiCats.length) return;
+  poiCtrl = new AbortController();
+  const ctrl = poiCtrl, r = route;
+  status.hidden = false;
+  status.textContent = 'Stopps werden gesucht …';
+  try {
+    const pois = await fetchPois(r, state.poiCats, ctrl.signal);
+    if (ctrl !== poiCtrl || r !== route) return;
+    status.textContent = pois.length ? `${pois.length} Stopps an der Strecke. Tippe auf ein Symbol in der Karte.` : 'Keine passenden Stopps direkt an der Strecke gefunden.';
+    for (const q of pois) {
+      const elm = h('button', { type: 'button', class: 'poi poi-' + q.cat, title: q.name, text: POI_CATS[q.cat].icon });
+      elm.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        openMenu(q.lat, q.lon, h('div', { class: 'map-menu' },
+          h('strong', { text: q.name }),
+          h('span', { class: 'menu-note', text: `${POI_CATS[q.cat].label}, bei km ${fmt(q.d / 1000, 1)}` }),
+          q.hours ? h('span', { class: 'menu-note', text: q.hours }) : null,
+          state.mode === 'route' ? h('button', { type: 'button', text: 'Als Wegpunkt einfügen', onclick: () => { closeMenu(); addVia(q.lat, q.lon); } }) : null), 14);
+      });
+      poiMarkers.push(new maplibregl.Marker({ element: elm }).setLngLat([q.lon, q.lat]).addTo(map));
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    status.textContent = e instanceof PoiError ? e.message : 'Die Stopps konnten nicht geladen werden.';
+  }
 }
 
 // ---------------------------------------------------------------- Oberfläche
@@ -1034,53 +1238,120 @@ function placeDock() {
   requestAnimationFrame(() => map && map.resize());
 }
 
+// Bottom-Sheet am Handy: feste Höhe, wird per Verschiebung ein- und ausgefahren (läuft flüssig, ohne die Karte umzubauen)
 const SHEET = ['peek', 'half', 'full'];
-function setSheet(mode) {
-  const p = $('panel');
-  p.style.height = '';
-  SHEET.forEach((m) => p.classList.toggle('sheet-' + m, m === mode));
-  document.body.dataset.sheet = mode;
+let sheetMode = 'half';
+
+function safeBottom() {
+  let probe = $('safeProbe');
+  if (!probe) { probe = h('div', { id: 'safeProbe', style: 'position:fixed;left:0;bottom:0;width:0;height:env(safe-area-inset-bottom);visibility:hidden' }); document.body.append(probe); }
+  return probe.offsetHeight || 0;
 }
+function sheetHeights() {
+  const vh = window.innerHeight, full = vh - 48;
+  return { full, half: Math.round(vh * 0.5), peek: (route ? 118 : 86) + safeBottom() };
+}
+function sheetVisible() { return isMobile() ? sheetHeights()[sheetMode] : 0; }
+function applySheet(y, visible) {
+  $('panel').style.setProperty('--sheet-y', Math.round(y) + 'px');
+  document.body.style.setProperty('--sheet-vis', Math.round(visible) + 'px');
+}
+function setSheet(mode) {
+  sheetMode = mode;
+  const hts = sheetHeights();
+  $('panel').style.setProperty('--sheet-h', hts.full + 'px');
+  applySheet(hts.full - hts[mode], hts[mode]);
+  document.body.dataset.sheet = mode;
+  if (mode !== 'full') $('panelScroll').scrollTop = 0;
+}
+
 function initSheet() {
-  const p = $('panel'), handle = $('sheetHandle');
-  let startY = 0, startH = 0, moved = false, dragging = false;
-  setSheet('half');
-  handle.addEventListener('pointerdown', (ev) => {
+  const p = $('panel');
+  let drag = null;
+  setSheet(sheetMode);
+  // Ziehen am Griff, an der Kopfzeile und an den Kennzahlen
+  p.addEventListener('pointerdown', (ev) => {
     if (!isMobile()) return;
-    dragging = true; moved = false; startY = ev.clientY; startH = p.offsetHeight;
-    handle.setPointerCapture(ev.pointerId);
+    const zone = ev.target.closest('.sheet-handle, .dock-head, #brandBar');
+    if (!zone || (ev.target.closest('button, input, select, a') && !ev.target.closest('.sheet-handle'))) return;
+    const hts = sheetHeights();
+    drag = { id: ev.pointerId, y0: ev.clientY, base: hts.full - hts[sheetMode], hts, moved: false, lastY: ev.clientY, lastT: ev.timeStamp, v: 0, handle: !!ev.target.closest('.sheet-handle') };
+    p.setPointerCapture(ev.pointerId);
     p.classList.add('dragging');
   });
-  handle.addEventListener('pointermove', (ev) => {
-    if (!dragging) return;
-    const dy = startY - ev.clientY;
-    if (Math.abs(dy) > 4) moved = true;
-    p.style.height = Math.max(90, Math.min(window.innerHeight - 40, startH + dy)) + 'px';
+  p.addEventListener('pointermove', (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    const dy = ev.clientY - drag.y0;
+    if (Math.abs(dy) > 5) drag.moved = true;
+    if (!drag.moved) return;
+    const dt = ev.timeStamp - drag.lastT;
+    if (dt > 0) drag.v = 0.7 * ((ev.clientY - drag.lastY) / dt) + 0.3 * drag.v;
+    drag.lastY = ev.clientY; drag.lastT = ev.timeStamp;
+    const y = Math.max(0, Math.min(drag.hts.full - 60, drag.base + dy));
+    applySheet(y, drag.hts.full - y);
   });
-  const end = () => {
-    if (!dragging) return;
-    dragging = false;
+  const end = (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    const d = drag;
+    drag = null;
     p.classList.remove('dragging');
-    const cur = SHEET.find((m) => p.classList.contains('sheet-' + m)) || 'half';
-    if (!moved) return setSheet(cur === 'peek' ? 'half' : cur === 'half' ? 'full' : 'peek');
-    const hNow = p.offsetHeight, vh = window.innerHeight;
-    setSheet(hNow < vh * 0.32 ? 'peek' : hNow < vh * 0.72 ? 'half' : 'full');
+    const i = SHEET.indexOf(sheetMode);
+    if (!d.moved) { if (d.handle) setSheet(SHEET[(i + 1) % 3]); return; }
+    const y = d.base + (ev.clientY - d.y0), visible = d.hts.full - y;
+    let target;
+    // Schneller Wisch: eine Stufe in Wischrichtung; sonst die nächstgelegene Stufe
+    if (Math.abs(d.v) > 0.45) target = SHEET[Math.max(0, Math.min(2, i + (d.v < 0 ? 1 : -1)))];
+    else target = SHEET.reduce((best, m) => (Math.abs(d.hts[m] - visible) < Math.abs(d.hts[best] - visible) ? m : best), 'peek');
+    setSheet(target);
   };
-  handle.addEventListener('pointerup', end);
-  handle.addEventListener('pointercancel', end);
-  // Beim Tippen in ein Suchfeld das Sheet öffnen, damit die Vorschläge Platz haben
-  $('panelScroll').addEventListener('focusin', (ev) => { if (isMobile() && ev.target.matches('input[type=text]')) setSheet('full'); });
+  p.addEventListener('pointerup', end);
+  p.addEventListener('pointercancel', end);
+  window.addEventListener('resize', () => setSheet(sheetMode));
+
+  // Texteingabe: Sheet ganz öffnen und das Feld nach oben holen, damit die Tastatur nichts verdeckt
+  const scroll = $('panelScroll');
+  scroll.addEventListener('focusin', (ev) => {
+    if (!isMobile() || !ev.target.matches('input[type=text], input[type=number]')) return;
+    setSheet('full');
+    document.body.classList.add('typing');
+    const field = ev.target;
+    setTimeout(() => {
+      const top = field.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop;
+      scroll.scrollTo({ top: Math.max(0, top - 14), behavior: 'smooth' });
+    }, 320);
+  });
+  scroll.addEventListener('focusout', () => document.body.classList.remove('typing'));
+  if (window.visualViewport) {
+    const onVV = () => {
+      if (!isMobile()) return;
+      // Platz für die Tastatur schaffen und verhindern, dass der Browser die ganze Seite wegschiebt
+      const kb = Math.max(0, window.innerHeight - window.visualViewport.height);
+      scroll.style.setProperty('--kb', (kb > 80 ? kb : 0) + 'px');
+      if (window.scrollY || document.documentElement.scrollTop) window.scrollTo(0, 0);
+    };
+    window.visualViewport.addEventListener('resize', onVV);
+    window.visualViewport.addEventListener('scroll', onVV);
+  }
+}
+
+function initFolds() {
+  for (const d of document.querySelectorAll('details[data-fold]')) {
+    const key = d.dataset.fold;
+    if (key in state.folds) d.open = state.folds[key];
+    d.addEventListener('toggle', () => { state.folds[key] = d.open; save(); });
+  }
 }
 
 function init() {
   load();
+  initFolds();
   initMap();
   initRound();
   initWeather();
   chart = createProfileChart($('profileChart'), { onHover: (d, p) => setHover(d, p) });
   initSheet();
   placeDock();
-  window.matchMedia('(max-width: 820px)').addEventListener('change', placeDock);
+  window.matchMedia('(max-width: 820px)').addEventListener('change', () => { placeDock(); setSheet(sheetMode); });
 
   renderProfile();
   renderOptions();
@@ -1119,9 +1390,19 @@ function init() {
   });
   $('btnLocate').addEventListener('click', () => locate(null));
   $('btnGpx').addEventListener('click', downloadGpx);
-  if (navigator.canShare && navigator.canShare({ files: [new File(['x'], 'x.gpx', { type: 'application/gpx+xml' })] })) {
+  if (navigator.canShare && navigator.canShare({ files: [new File(['x'], 'x.gpx', { type: 'application/octet-stream' })] })) {
     $('btnShare').hidden = false;
     $('btnShare').addEventListener('click', shareGpx);
+    $('gpxHint').textContent = 'Für Garmin: „Teilen“ und Connect wählen. Fehlt Connect in der Liste, tippe am Ende der App-Reihe auf „Mehr“ oder sichere die Datei in „Dateien“ und teile sie von dort mit Connect.';
+  }
+  $('btnSave').addEventListener('click', saveTour);
+  $('btnImport').addEventListener('click', () => $('gpxFile').click());
+  $('gpxFile').addEventListener('change', () => { const f = $('gpxFile').files[0]; $('gpxFile').value = ''; if (f) importGpx(f); });
+  renderTours();
+  renderPoiChips();
+  // Standort gleich anzeigen, wenn der Zugriff schon früher erlaubt wurde
+  if (navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({ name: 'geolocation' }).then((r) => { if (r.state === 'granted') startWatch(false); }).catch(() => {});
   }
   document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { toggleLayerMenu(false); closeMenu(); } });
 

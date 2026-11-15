@@ -13,6 +13,8 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 - Einstellungen, Favoriten und die letzte Tour werden lokal im Browser gespeichert
 
 - Hin und zurück sowie automatische Rundtouren nach Wunschlänge, Richtung und Höhenmeter-Vorliebe
+- Umweg von A nach B auf Wunschlänge, Stopps an der Strecke (Trinkwasser, Café, Einkehr, Supermarkt, Radladen)
+- Touren speichern, GPX-Import
 - Wetter und Wind entlang der Strecke zur gewählten Abfahrtszeit, Empfehlung für Startzeit und Fahrtrichtung, Rundtouren mit Rückenwind auf dem Heimweg
 
 ## Dienste und Daten
@@ -22,6 +24,7 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 | Routing | [BRouter](https://brouter.de) (öffentlicher Server) |
 | Karten | [OpenFreeMap](https://openfreemap.org) (Standard), [CyclOSM](https://www.cyclosm.org), [OpenTopoMap](https://opentopomap.org), Esri (Satellit) |
 | Wetter | [Open-Meteo](https://open-meteo.com) |
+| Stopps | [Overpass API](https://overpass-api.de) |
 | Suche | [Photon](https://photon.komoot.io) |
 | Kartendaten | © [OpenStreetMap](https://www.openstreetmap.org/copyright)-Mitwirkende |
 

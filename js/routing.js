@@ -309,11 +309,65 @@ export function sectionAt(route, d) {
   return null;
 }
 
-export function toGpx(route, name) {
+const PLAN_TAG = 'rueckenwind-plan:';
+
+/** Liest eine GPX-Datei: eingebetteter Plan dieser App (falls vorhanden), Name und Streckenpunkte. */
+export function parseGpx(text) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  if (doc.querySelector('parsererror')) throw new RouteError('Die Datei ist keine lesbare GPX-Datei.');
+  let plan = null;
+  const desc = doc.querySelector('metadata > desc');
+  if (desc && desc.textContent.startsWith(PLAN_TAG)) { try { plan = JSON.parse(desc.textContent.slice(PLAN_TAG.length)); } catch (e) { plan = null; } }
+  const nameEl = doc.querySelector('metadata > name, trk > name, rte > name');
+  let nodes = doc.querySelectorAll('trkpt');
+  if (!nodes.length) nodes = doc.querySelectorAll('rtept');
+  const points = [];
+  for (const n of nodes) {
+    const lat = parseFloat(n.getAttribute('lat')), lon = parseFloat(n.getAttribute('lon'));
+    if (Number.isFinite(lat) && Number.isFinite(lon)) points.push({ lat, lon });
+  }
+  if (!plan && points.length < 2) throw new RouteError('Die GPX-Datei enthält keine Strecke.');
+  return { plan, points, name: nameEl ? nameEl.textContent.trim() : '' };
+}
+
+// Reduziert eine Punktfolge auf höchstens maxN Stützpunkte (Douglas-Peucker mit wachsender Toleranz).
+export function simplifyTrack(points, maxN) {
+  const k = Math.cos(points[0].lat * Math.PI / 180);
+  const dist = (p, a, b) => {
+    const ax = a.lon * k, ay = a.lat, bx = b.lon * k, by = b.lat, px = p.lon * k, py = p.lat;
+    const dx = bx - ax, dy = by - ay, len = dx * dx + dy * dy;
+    const t = len ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len)) : 0;
+    return Math.hypot(px - ax - t * dx, py - ay - t * dy);
+  };
+  const run = (tol) => {
+    const keep = new Uint8Array(points.length);
+    keep[0] = keep[points.length - 1] = 1;
+    const stack = [[0, points.length - 1]];
+    while (stack.length) {
+      const [a, b] = stack.pop();
+      let best = -1, bd = tol;
+      for (let i = a + 1; i < b; i++) { const d = dist(points[i], points[a], points[b]); if (d > bd) { bd = d; best = i; } }
+      if (best > 0) { keep[best] = 1; stack.push([a, best], [best, b]); }
+    }
+    return points.filter((_, i) => keep[i]);
+  };
+  // Bei geschlossenen Runden zusätzlich den fernsten Punkt halten, sonst fällt alles auf den Start zusammen
+  let tol = 0.002, out = run(tol);
+  while (out.length > maxN && tol < 1) { tol *= 1.5; out = run(tol); }
+  if (out.length < 3) {
+    let far = 0, fd = 0;
+    points.forEach((p, i) => { const d = Math.hypot((p.lon - points[0].lon) * k, p.lat - points[0].lat); if (d > fd) { fd = d; far = i; } });
+    if (fd > 0.002) out = [points[0], points[Math.floor(far / 2)], points[far], points[Math.floor((far + points.length - 1) / 2)], points[points.length - 1]];
+  }
+  return out;
+}
+
+export function toGpx(route, name, plan) {
   const esc = (s) => String(s).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
   const out = ['<?xml version="1.0" encoding="UTF-8"?>',
     '<gpx version="1.1" creator="Rueckenwind Routenplaner" xmlns="http://www.topografix.com/GPX/1/1">',
-    ' <metadata><name>' + esc(name) + '</name><time>' + new Date().toISOString() + '</time></metadata>',
+    ' <metadata><name>' + esc(name) + '</name>' + (plan ? '<desc>' + esc(PLAN_TAG + JSON.stringify(plan)) + '</desc>' : '') +
+      '<time>' + new Date().toISOString() + '</time></metadata>',
     ' <trk><name>' + esc(name) + '</name><type>cycling</type><trkseg>'];
   for (let i = 0; i < route.n; i++) {
     out.push('  <trkpt lat="' + route.lat[i].toFixed(6) + '" lon="' + route.lon[i].toFixed(6) + '">' +

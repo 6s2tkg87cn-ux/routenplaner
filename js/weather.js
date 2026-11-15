@@ -118,7 +118,7 @@ export function analyze(route, samples, forecasts, start, speed, reverse = false
     if (mid > total / 2) { sumLate += comp * len; lateLen += len; }
     if (w.gust > maxGust) maxGust = w.gust;
     const last = bins[bins.length - 1];
-    if (last && last.cls === cls) { last.to = d1; last.comp = (last.comp + comp) / 2; } else bins.push({ from: d0, to: d1, cls, comp, wind: w.wind });
+    if (last && last.cls === cls) { last.to = d1; last.comp = (last.comp + comp) / 2; } else bins.push({ from: d0, to: d1, cls, comp, wind: w.wind, wdir: w.wdir });
   }
 
   const rows = [];
