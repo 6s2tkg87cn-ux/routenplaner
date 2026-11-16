@@ -5,12 +5,12 @@
 // Stopps · Oberfläche (Bottom-Sheet, Höhenprofil) · Start.
 // Rechnen und Daten liegen in eigenen Dateien: routing.js, roundtrip.js, weather.js, pois.js, offline.js, elevation.js.
 import {
-  PROFILES, DEFAULT_OPTIONS, travelHours, projectOnRoute, routeBearing, haversine, fetchRoute, RouteError, nearestIndex, pointAt, toGpx, parseGpx, simplifyTrack,
+  PROFILES, DEFAULT_OPTIONS, travelHours, findClimbs, projectOnRoute, routeBearing, haversine, fetchRoute, RouteError, nearestIndex, pointAt, toGpx, parseGpx, simplifyTrack,
   SURFACES, SURFACE_LABEL, WAYS, WAY_LABEL,
 } from './routing.js';
 import { createProfileChart } from './elevation.js';
 import { generateRoundTrips, generateDetours } from './roundtrip.js';
-import { POI_CATS, fetchPois, PoiError } from './pois.js';
+import { POI_CATS, POI_GROUPS, fetchPois, PoiError } from './pois.js';
 import { listOffline, planDownload, runDownload, removeDownload } from './offline.js';
 import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 
@@ -35,6 +35,7 @@ const mb = (bytes) => (bytes < 10e6 ? fmt(bytes / 1e6, 1) : fmt(bytes / 1e6)) + 
 // ---------------------------------------------------------------- Zustand
 
 const STORE_KEY = 'rueckenwind.v1';
+const TABS = { plan: 'Planen', tour: 'Tour', wetter: 'Wetter', stopps: 'Stopps', touren: 'Meine' };
 const emptyWp = () => ({ id: uid(), lat: null, lon: null, label: '' });
 
 const state = {
@@ -54,6 +55,8 @@ const state = {
   folds: {},
   detourKm: '',
   chartH: { desktop: 110, mobile: 90 },
+  tab: 'plan',
+  radar: false,
   waypoints: [emptyWp(), emptyWp()],
   nogos: [],
   favorites: [],
@@ -82,6 +85,8 @@ function load() {
     if (s.folds && typeof s.folds === 'object') state.folds = s.folds;
     if (s.detourKm) state.detourKm = s.detourKm;
     if (s.chartH && s.chartH.desktop > 0 && s.chartH.mobile > 0) state.chartH = s.chartH;
+    if (TABS[s.tab]) state.tab = s.tab;
+    state.radar = !!s.radar;
     if (Array.isArray(s.waypoints) && s.waypoints.length >= 2) state.waypoints = s.waypoints.map((w) => ({ ...emptyWp(), ...w, id: uid() }));
     if (Array.isArray(s.nogos)) state.nogos = s.nogos.map((n) => ({ ...n, id: uid() }));
     if (Array.isArray(s.favorites)) state.favorites = s.favorites;
@@ -128,6 +133,36 @@ function applyTrails() {
     attribution: 'Routen: <a href="https://waymarkedtrails.org" target="_blank" rel="noopener">Waymarked Trails</a>' });
   // unter den eigenen Ebenen (Route, Sperrzonen), über der Grundkarte
   map.addLayer({ id: 'trails', type: 'raster', source: 'trails', paint: { 'raster-opacity': 0.85 } }, map.getLayer('nogo-fill') ? 'nogo-fill' : undefined);
+}
+
+// Regenradar (RainViewer): letztes Radarbild als Überlagerung, alle fünf Minuten erneuert
+let radarTimer = 0, radarInfo = null;
+async function applyRadar() {
+  clearTimeout(radarTimer);
+  const btn = $('layerMenu').querySelector('[data-radar]');
+  if (btn) btn.setAttribute('aria-checked', String(state.radar));
+  const clear = () => { if (map.getLayer('radar')) map.removeLayer('radar'); if (map.getSource('radar')) map.removeSource('radar'); };
+  if (!state.radar || !online()) { clear(); radarInfo = null; return renderRadarInfo(); }
+  try {
+    const res = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+    const data = await res.json(), frames = (data.radar && data.radar.past) || [], last = frames[frames.length - 1];
+    if (!last) throw new Error('keine Radarbilder');
+    if (!state.radar) return;
+    clear();
+    map.addSource('radar', { type: 'raster', tiles: [`${data.host}${last.path}/256/{z}/{x}/{y}/2/1_1.png`], tileSize: 256, maxzoom: 7,
+      attribution: 'Radar: <a href="https://www.rainviewer.com" target="_blank" rel="noopener">RainViewer</a>' });
+    map.addLayer({ id: 'radar', type: 'raster', source: 'radar', paint: { 'raster-opacity': 0.6 } }, map.getLayer('nogo-fill') ? 'nogo-fill' : undefined);
+    radarInfo = 'Regenradar, Stand ' + new Date(last.time * 1000).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) + ' Uhr';
+  } catch (e) {
+    clear();
+    radarInfo = 'Das Regenradar ist gerade nicht erreichbar.';
+  }
+  renderRadarInfo();
+  radarTimer = setTimeout(applyRadar, 5 * 60 * 1000);
+}
+function renderRadarInfo() {
+  $('radarBadge').hidden = !radarInfo;
+  $('radarBadge').textContent = radarInfo || '';
 }
 
 let map, chart, hoverMarker = null, popup = null;
@@ -185,6 +220,7 @@ function addOverlays() {
     'icon-image': 'chevron', 'icon-size': 0.9, 'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-rotation-alignment': 'map' } });
   map.addLayer({ id: 'route-hit', type: 'line', source: 'route', paint: { 'line-color': '#000', 'line-width': 24, 'line-opacity': 0.01 } });
   applyTrails();
+  applyRadar();
 }
 function setOverlay(key, data) {
   overlay[key] = data;
@@ -225,6 +261,9 @@ function initMap() {
     menu.append(h('button', { type: 'button', role: 'menuitemradio', 'data-trail': key, text: TRAILS[key], 'aria-checked': String(key === state.trails),
       onclick: () => { state.trails = key; save(); applyTrails(); toggleLayerMenu(false); } }));
   }
+  menu.append(h('div', { class: 'menu-sep', text: 'Wetter' }));
+  menu.append(h('button', { type: 'button', role: 'menuitemcheckbox', 'data-radar': '1', text: 'Regenradar', 'aria-checked': String(state.radar),
+    onclick: () => { state.radar = !state.radar; save(); applyRadar(); toggleLayerMenu(false); } }));
   $('btnLayers').addEventListener('click', () => toggleLayerMenu($('layerMenu').hidden));
 
   map.on('moveend', () => {
@@ -292,6 +331,7 @@ function onMapClick(lat, lng) {
   if (state.mode === 'round') {
     return openMenu(lat, lng, h('div', { class: 'map-menu' },
       item('Als Start', () => setWaypoint(0, lat, lng, null)),
+      item('Rundtour über diesen Punkt', () => setRoundVia(lat, lng, null)),
       item('Hier sperren', () => addNogo(lat, lng), 'danger')));
   }
   if (filled === 1 && state.waypoints[last].lat == null) return setWaypoint(last, lat, lng, null);
@@ -374,7 +414,7 @@ function renderWaypoints() {
       placeholder: wpName(i) + ' suchen oder auf Karte tippen', 'aria-label': wpName(i) });
     input.value = w.label;
     const drop = h('div', { class: 'ac', hidden: true });
-    attachAutocomplete(input, drop, i);
+    attachAutocomplete(input, drop, wpTarget(i));
     const set = w.lat != null;
     const li = h('li', { class: 'wp' + (i === 0 ? ' wp-start' : isEnd(i) ? ' wp-end' : '') },
       h('span', { class: 'wp-badge', text: wpBadge(i), 'aria-hidden': 'true' }),
@@ -464,7 +504,15 @@ async function reverseGeocode(lat, lon) {
   } catch (e) { return null; }
 }
 
-function attachAutocomplete(input, drop, index) {
+// Ziel einer Ortssuche: ein Wegpunkt oder (bei der Rundtour) der Wunschpunkt
+const wpTarget = (index) => ({
+  pick: (lat, lon, label) => { fitNext = true; setWaypoint(index, lat, lon, label); },
+  locate: () => locate(index),
+  label: () => (state.waypoints[index] ? state.waypoints[index].label : ''),
+  isSet: () => !!state.waypoints[index] && state.waypoints[index].lat != null,
+});
+
+function attachAutocomplete(input, drop, target) {
   let ctrl = null, timer = 0, items = [], active = -1;
 
   const close = () => { drop.hidden = true; active = -1; };
@@ -472,9 +520,8 @@ function attachAutocomplete(input, drop, index) {
     close();
     input.blur();
     if (isMobile()) setSheet('half');
-    if (it.locate) return locate(index);
-    fitNext = true;
-    setWaypoint(index, it.lat, it.lon, it.short || it.main);
+    if (it.locate) return target.locate();
+    target.pick(it.lat, it.lon, it.short || it.main);
   };
   const show = (list, note) => {
     items = list; active = -1;
@@ -489,7 +536,7 @@ function attachAutocomplete(input, drop, index) {
     if (note) drop.append(h('div', { class: 'ac-note', text: note }));
     drop.hidden = list.length === 0 && !note;
   };
-  const baseItems = () => [{ locate: true, main: 'Mein Standort' }, ...state.favorites.map((f) => ({ fav: true, main: f.label, sub: 'Favorit', lat: f.lat, lon: f.lon }))];
+  const baseItems = () => [...(target.locate ? [{ locate: true, main: 'Mein Standort' }] : []), ...state.favorites.map((f) => ({ fav: true, main: f.label, sub: 'Favorit', lat: f.lat, lon: f.lon }))];
 
   const run = async () => {
     const q = input.value.trim();
@@ -510,9 +557,9 @@ function attachAutocomplete(input, drop, index) {
     }
   };
 
-  input.addEventListener('focus', () => { input.select(); if (input.value.trim().length < 2 || state.waypoints[index].lat != null) show(baseItems()); else run(); });
+  input.addEventListener('focus', () => { input.select(); if (input.value.trim().length < 2 || target.isSet()) show(baseItems()); else run(); });
   input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 280); });
-  input.addEventListener('blur', () => { setTimeout(close, 120); input.value = state.waypoints[index] ? state.waypoints[index].label : ''; });
+  input.addEventListener('blur', () => { setTimeout(close, 120); input.value = target.label(); });
   input.addEventListener('keydown', (ev) => {
     if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
       ev.preventDefault();
@@ -674,7 +721,7 @@ function renderProfile() {
         state.profile = key; renderProfile(); renderOptions(); changed();
       } }));
   }
-  $('speedLabel').textContent = { rennrad: 'Durchschnitt mit dem Rennrad', gravel: 'Durchschnitt mit dem Gravelbike', alltag: 'Durchschnitt im Alltag', wandern: 'Gehtempo in der Ebene' }[state.profile];
+  $('speedLabel').textContent = { rennrad: 'Rennrad: Tempo in der Ebene', gravel: 'Gravelbike: Tempo in der Ebene', alltag: 'Alltagsrad: Tempo in der Ebene', wandern: 'Gehtempo in der Ebene' }[state.profile];
   renderRoundChips();
   $('speedInput').value = state.speeds[state.profile];
 }
@@ -752,6 +799,7 @@ function showRoute() {
   $('stMax').innerHTML = route.hasEle ? `${fmt(route.maxEle)}<small> m</small>` : '–';
   renderTime();
   renderAlt();
+  renderClimbs();
   renderComposition();
   placeDock();
   chart.setRoute(route);
@@ -811,6 +859,23 @@ function renderAlt() {
     seg.append(h('button', { type: 'button', role: 'radio', 'aria-checked': String(alt === i), text: String(i + 1), 'aria-label': 'Variante ' + (i + 1),
       onclick: () => { alt = i; renderAlt(); changed({ keepAlt: true }); } }));
   }
+}
+
+function renderClimbs() {
+  const host = $('climbs');
+  host.replaceChildren();
+  if (!route) return;
+  const list = findClimbs(route, !!PROFILES[state.profile].foot);
+  if (!list.length) return;
+  const ul = h('ul', { class: 'climb-list' });
+  list.forEach((c, i) => {
+    ul.append(h('li', {}, h('button', { type: 'button', class: 'climb', title: 'Im Profil und auf der Karte zeigen',
+      onclick: () => { chart.setSelection([c.from, c.to]); selectRange([c.from, c.to]); if (isMobile()) setSheet('half'); } },
+    h('span', { class: 'climb-main', text: `Anstieg ${i + 1}: ${fmt(c.gain)} m auf ${fmt(c.len / 1000, 1)} km` }),
+    h('span', { class: 'climb-sub', text: `km ${fmt(c.from / 1000, 1)} bis ${fmt(c.to / 1000, 1)}, steilstes Stück ${fmt(c.max)} %` }),
+    h('span', { class: 'climb-grade', text: fmt(c.avg, 1) + ' %' }))));
+  });
+  host.append(h('div', { class: 'comp', style: 'margin-top:14px' }, h('h3', { text: list.length === 1 ? '1 Anstieg' : `${list.length} Anstiege, zusammen ${fmt(list.reduce((s2, c) => s2 + c.gain, 0))} m` }), ul));
 }
 
 function renderComposition() {
@@ -900,7 +965,7 @@ async function runProposals(kind) {
           if (w && w.wind != null) wind = { from: w.wdir, speed: w.wind };
         } catch (e) { if (e.name === 'AbortError') throw e; }
       }
-      res = await generateRoundTrips({ ...common, start: from, climb: state.round.climb, wind, direction: state.round.dir === 'any' ? null : +state.round.dir });
+      res = await generateRoundTrips({ ...common, start: from, climb: state.round.climb, wind, via: state.round.via || null, direction: state.round.dir === 'any' ? null : +state.round.dir });
     } else {
       res = await generateDetours({ ...common, start: from, end: to, directDist });
       res.forEach((c) => { c.end = to; });
@@ -968,6 +1033,25 @@ function renderCandidates() {
   });
 }
 
+// Wunschpunkt der Rundtour
+let viaMarker = null;
+async function setRoundVia(lat, lon, label) {
+  state.round.via = lat == null ? null : { lat, lon, label: label || fmt(lat, 5) + ', ' + fmt(lon, 5) };
+  save(); renderRoundVia();
+  if (lat != null && !label) {
+    const name = await reverseGeocode(lat, lon);
+    if (name && state.round.via && state.round.via.lat === lat) { state.round.via.label = name; save(); renderRoundVia(); }
+  }
+}
+function renderRoundVia() {
+  const v = state.round.via;
+  $('roundVia').value = v ? v.label : '';
+  $('roundDir').disabled = !!v; // die Richtung ergibt sich aus dem Wunschpunkt
+  if (viaMarker) { viaMarker.remove(); viaMarker = null; }
+  if (v && state.mode === 'round') viaMarker = new maplibregl.Marker({ element: h('div', { class: 'pin pin-via', text: '★', title: 'Wunschpunkt' }), draggable: true }).setLngLat([v.lon, v.lat]).addTo(map);
+  if (viaMarker) viaMarker.on('dragend', () => { const p = viaMarker.getLngLat(); setRoundVia(p.lat, p.lng, null); });
+}
+
 function renderLoop() {
   $('loopSwitch').checked = state.loop;
 }
@@ -978,6 +1062,7 @@ function renderMode() {
   $('roundBlock').hidden = state.mode !== 'round';
   $('routeExtras').hidden = state.mode !== 'route';
   $('btnEditWp').hidden = state.mode === 'route';
+  renderRoundVia();
 }
 
 function initRound() {
@@ -1007,6 +1092,12 @@ function initRound() {
       'aria-checked': String(state.round.climb === v), text: label, onclick: () => { state.round.climb = v; save(); renderClimb(); } })));
   };
   renderClimb();
+  attachAutocomplete($('roundVia'), $('roundViaAc'), {
+    pick: (lat, lon, label) => setRoundVia(lat, lon, label),
+    label: () => (state.round.via ? state.round.via.label : ''),
+    isSet: () => !!state.round.via,
+  });
+  $('roundVia').addEventListener('change', () => { if (!$('roundVia').value.trim()) setRoundVia(null); });
   $('btnRound').addEventListener('click', () => runProposals('round'));
   $('btnDetour').addEventListener('click', () => runProposals('detour'));
   $('detourKm').value = state.detourKm;
@@ -1383,6 +1474,7 @@ function restore(plan, name, stored) {
   state.loop = !!plan.loop;
   state.nogos = (plan.nogos || []).map((n) => ({ ...n, id: uid() }));
   state.mode = 'route';
+  setTab('plan');
   state.tourName = name || '';
   $('tourName').value = state.tourName;
   fitNext = true;
@@ -1433,6 +1525,51 @@ async function shareGpx() {
   const file = shareFile();
   if (!file) return downloadGpx();
   try { await navigator.share({ files: [file] }); } catch (e) { if (e.name !== 'AbortError') downloadGpx(); }
+}
+
+// ---------------------------------------------------------------- Tour-Link
+
+// Der Link enthält die ganze Planung (Radtyp, Optionen, Wegpunkte, Sperrzonen), gepackt und für URLs kodiert.
+const b64 = {
+  enc: (bytes) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+  dec: (str) => Uint8Array.from(atob(str.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)),
+};
+async function pipe(bytes, stream) {
+  const out = new Response(new Blob([bytes]).stream().pipeThrough(stream));
+  return new Uint8Array(await out.arrayBuffer());
+}
+async function tourLink() {
+  const plan = snapshot(), def = DEFAULT_OPTIONS[plan.profile], opts = {};
+  for (const k in plan.options) if (plan.options[k] !== def[k]) opts[k] = plan.options[k]; // nur Abweichungen vom Standard
+  const data = { n: state.tourName.trim() || defaultTourName(), p: plan.profile, o: opts, l: plan.loop ? 1 : 0,
+    w: plan.waypoints.map((w) => [+w.lat.toFixed(5), +w.lon.toFixed(5), w.label]), g: plan.nogos.map((n) => [+n.lat.toFixed(5), +n.lon.toFixed(5), n.radius]) };
+  const raw = new TextEncoder().encode(JSON.stringify(data));
+  let code = 'j' + b64.enc(raw);
+  if (window.CompressionStream) { try { code = 'z' + b64.enc(await pipe(raw, new CompressionStream('deflate-raw'))); } catch (e) { /* ungepackt verwenden */ } }
+  return location.origin + location.pathname + '#t=' + code;
+}
+async function readTourLink() {
+  const m = location.hash.match(/[#&]t=([jz])([\w-]+)/);
+  if (!m) return false;
+  history.replaceState(null, '', location.pathname + location.search);
+  try {
+    let bytes = b64.dec(m[2]);
+    if (m[1] === 'z') bytes = await pipe(bytes, new DecompressionStream('deflate-raw'));
+    const d = JSON.parse(new TextDecoder().decode(bytes));
+    restore({ profile: d.p, options: d.o || {}, loop: !!d.l, waypoints: d.w.map((w) => ({ lat: w[0], lon: w[1], label: w[2] })),
+      nogos: (d.g || []).map((n) => ({ lat: n[0], lon: n[1], radius: n[2] })) }, d.n || '');
+    toast('Tour aus dem Link geladen.');
+    return true;
+  } catch (e) {
+    toast('Der Tour-Link ist beschädigt und konnte nicht gelesen werden.', true);
+    return false;
+  }
+}
+async function shareLink() {
+  if (!route) return;
+  const url = await tourLink(), title = state.tourName.trim() || defaultTourName();
+  if (navigator.share && isMobile()) { try { await navigator.share({ title, url }); return; } catch (e) { if (e.name === 'AbortError') return; } }
+  try { await navigator.clipboard.writeText(url); toast('Link kopiert. Er öffnet die Tour auf jedem Gerät.'); } catch (e) { window.prompt('Link zur Tour:', url); }
 }
 
 // ---------------------------------------------------------------- Meine Touren
@@ -1576,11 +1713,15 @@ async function importGpx(file) {
 let poiMarkers = [], poiCtrl = null, poiTimer = 0;
 
 function renderPoiChips() {
-  $('poiChips').replaceChildren(...Object.entries(POI_CATS).map(([key, c]) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(state.poiCats.includes(key)),
-    text: c.icon + ' ' + c.label, onclick: () => {
-      state.poiCats = state.poiCats.includes(key) ? state.poiCats.filter((k) => k !== key) : [...state.poiCats, key];
-      save(); renderPoiChips(); schedulePois(100);
-    } })));
+  const host = $('poiChips');
+  host.replaceChildren();
+  for (const [title, keys] of POI_GROUPS) {
+    host.append(h('div', { class: 'poi-group', text: title }), h('div', { class: 'chips' }, ...keys.map((key) => h('button', { type: 'button', class: 'chip',
+      'aria-pressed': String(state.poiCats.includes(key)), text: POI_CATS[key].icon + ' ' + POI_CATS[key].label, onclick: () => {
+        state.poiCats = state.poiCats.includes(key) ? state.poiCats.filter((k) => k !== key) : [...state.poiCats, key];
+        save(); renderPoiChips(); schedulePois(100);
+      } }))));
+  }
 }
 
 function schedulePois(delay = 300) {
@@ -1776,6 +1917,20 @@ function initChartGrip() {
   grip.addEventListener('pointercancel', end);
 }
 
+function setTab(tab) {
+  state.tab = TABS[tab] ? tab : 'plan';
+  document.body.dataset.tab = state.tab;
+  for (const b of $('tabBar').children) b.setAttribute('aria-selected', String(b.dataset.tab === state.tab));
+  $('panelScroll').scrollTop = 0;
+  save();
+}
+function initTabs() {
+  for (const key in TABS) $('tabBar').append(h('button', { type: 'button', role: 'tab', 'data-tab': key, text: TABS[key],
+    onclick: () => { setTab(key); if (isMobile() && sheetMode === 'peek') setSheet('half'); } }));
+  $('tabBar').setAttribute('role', 'tablist');
+  setTab(state.tab);
+}
+
 function initLegend() {
   const btn = $('btnLegend'), legend = $('chartLegend');
   const apply = () => { legend.hidden = !state.folds.legend; btn.setAttribute('aria-expanded', String(!!state.folds.legend)); btn.textContent = state.folds.legend ? 'Legende ausblenden' : 'Legende'; };
@@ -1791,8 +1946,9 @@ function initFolds() {
   }
 }
 
-function init() {
+async function init() {
   load();
+  initTabs();
   initFolds();
   initMap();
   initRound();
@@ -1849,11 +2005,13 @@ function init() {
     $('gpxHint').textContent = 'Für Garmin: „Teilen“ und Connect wählen. Fehlt Connect in der Liste, tippe am Ende der App-Reihe auf „Mehr“ oder sichere die Datei in „Dateien“ und teile sie von dort mit Connect.';
   }
   $('btnSave').addEventListener('click', saveTour);
+  $('btnLink').addEventListener('click', shareLink);
   $('btnImport').addEventListener('click', () => $('gpxFile').click());
   $('gpxFile').addEventListener('change', () => { const f = $('gpxFile').files[0]; $('gpxFile').value = ''; if (f) importGpx(f); });
   renderTours();
   refreshOffline();
   $('btnOffClear').addEventListener('click', async () => { for (const id of [...offRecs.keys()]) await removeDownload(id).catch(() => {}); refreshOffline(); toast('Alle Offline-Daten gelöscht.'); });
+  window.addEventListener('hashchange', readTourLink);
   window.addEventListener('online', applyOnline);
   window.addEventListener('offline', applyOnline);
   applyOnline();
@@ -1866,7 +2024,8 @@ function init() {
   }
   document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { toggleLayerMenu(false); closeMenu(); } });
 
-  if (state.waypoints.filter((w) => w.lat != null).length >= 2 && online()) calcRoute();
+  if (await readTourLink()) { /* Tour aus dem Link wird geladen */ }
+  else if (state.waypoints.filter((w) => w.lat != null).length >= 2 && online()) calcRoute();
   else if (!online()) toast('Kein Internet. Offline-Touren findest du unter „Meine Touren“.');
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1' || location.hostname === 'localhost')) navigator.serviceWorker.register('sw.js').catch(() => {});
 }

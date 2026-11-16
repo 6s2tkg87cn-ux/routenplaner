@@ -29,12 +29,14 @@
         <button id="btnNew" class="link-btn" type="button">Neue Tour</button>
       </header>
 
-      <section class="block block-first">
+      <nav class="tabs" id="tabBar" aria-label="Bereiche"></nav>
+
+      <section class="block block-first" data-tab="plan">
         <div class="seg seg-profile" id="profileSeg" role="radiogroup" aria-label="Radtyp"></div>
         <div class="seg seg-mode" id="modeSeg" role="radiogroup" aria-label="Art der Planung"></div>
       </section>
 
-      <section class="block" aria-label="Planung">
+      <section class="block" aria-label="Planung" data-tab="plan">
         <ol id="wpList" class="wp-list"></ol>
         <p class="hint" id="mapHint"></p>
 
@@ -65,6 +67,8 @@
             </div>
             <label class="form-label" for="roundDir">Richtung</label>
             <select id="roundDir" class="select"></select>
+            <label class="form-label" for="roundVia">Über</label>
+            <div class="wp-field"><input id="roundVia" class="wp-input" type="text" autocomplete="off" spellcheck="false" placeholder="Wunschpunkt (optional)"><div class="ac" id="roundViaAc" hidden></div></div>
             <span class="form-label" id="climbLabel">Höhenmeter</span>
             <div class="seg seg-small" id="climbSeg" role="radiogroup" aria-labelledby="climbLabel"></div>
           </div>
@@ -77,14 +81,14 @@
         <p class="hint" id="roundStatus" hidden></p>
       </section>
 
-      <section class="block" id="candWrap" hidden>
+      <section class="block" id="candWrap" data-tab="plan" hidden>
         <h2>Vorschläge</h2>
         <ul id="candList" class="cand-list"></ul>
         <button id="btnEditWp" class="link-btn" type="button">Wegpunkte bearbeiten</button>
       </section>
 
-      <details class="block fold" data-fold="wx" open>
-        <summary><span>Abfahrt, Tempo und Wetter</span></summary>
+      <section class="block" data-tab="wetter">
+        <h2>Abfahrt, Tempo und Wetter</h2>
         <div class="fold-body">
           <div class="wx-when">
             <select id="wxDay" class="select" aria-label="Tag der Abfahrt"></select>
@@ -100,9 +104,9 @@
             <input type="checkbox" id="wxMap" class="switch">
           </div>
         </div>
-      </details>
+      </section>
 
-      <details class="block fold" data-fold="opt" open>
+      <details class="block fold" data-fold="opt" data-tab="plan" open>
         <summary><span>Optionen</span><button id="btnResetOpt" class="link-btn" type="button">Zurücksetzen</button></summary>
         <div class="fold-body">
           <div id="optList" class="opt-list"></div>
@@ -110,8 +114,8 @@
         </div>
       </details>
 
-      <details class="block fold" id="poiBlock" data-fold="poi" open hidden>
-        <summary><span>Stopps an der Strecke</span></summary>
+      <section class="block" id="poiBlock" data-tab="stopps" hidden>
+        <h2>Stopps an der Strecke</h2>
         <div class="fold-body">
           <div id="poiChips" class="chips"></div>
           <div class="form-grid form-grid-wide poi-radius">
@@ -123,30 +127,32 @@
           </div>
           <p class="hint" id="poiStatus" hidden></p>
         </div>
-      </details>
+      </section>
 
-      <details class="block fold" id="nogoBlock" data-fold="nogo" open hidden>
+      <details class="block fold" id="nogoBlock" data-fold="nogo" data-tab="plan" open hidden>
         <summary><span>Sperrzonen</span></summary>
         <div class="fold-body"><ul id="nogoList" class="nogo-list"></ul></div>
       </details>
 
-      <details class="block fold" id="tourBlock" data-fold="tour" open hidden>
-        <summary><span>Tour</span></summary>
+      <section class="block" id="tourBlock" data-tab="tour" hidden>
+        <h2>Tour</h2>
         <div class="fold-body">
           <label class="field-label" for="tourName">Name</label>
           <input id="tourName" class="text-input" type="text" autocomplete="off" placeholder="Name der Tour">
+          <div id="climbs"></div>
           <div id="composition"></div>
           <div class="btn-row btn-row-top">
             <button id="btnGpx" class="primary-btn" type="button">GPX herunterladen</button>
             <button id="btnShare" class="ghost-btn" type="button" hidden>Teilen</button>
             <button id="btnSave" class="ghost-btn" type="button">Tour speichern</button>
+            <button id="btnLink" class="ghost-btn" type="button">Link teilen</button>
           </div>
           <p class="hint" id="gpxHint">Die GPX-Datei kannst du in Garmin Connect importieren oder direkt auf den Edge kopieren.</p>
         </div>
-      </details>
+      </section>
 
-      <details class="block fold" data-fold="tours">
-        <summary><span>Meine Touren</span></summary>
+      <section class="block" data-tab="touren">
+        <h2>Meine Touren</h2>
         <div class="fold-body">
           <ul id="tourList" class="tour-list"></ul>
           <p class="hint" id="tourEmpty">Noch keine Tour gespeichert. Gespeicherte Touren bleiben auf diesem Gerät.</p>
@@ -156,9 +162,11 @@
             <input id="gpxFile" type="file" accept=".gpx,application/gpx+xml,application/xml,text/xml" hidden>
           </div>
         </div>
-      </details>
+      </section>
 
-      <footer class="credits">
+      <p class="hint tab-empty" data-tab="tour stopps">Plane zuerst eine Route. Dann erscheinen hier die Angaben dazu.</p>
+
+      <footer class="credits" data-tab="touren">
         Routing: <a href="https://brouter.de" target="_blank" rel="noopener">BRouter</a>.
         Karten und Daten: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>-Mitwirkende.
         Suche: <a href="https://photon.komoot.io" target="_blank" rel="noopener">Photon</a>.
@@ -181,6 +189,7 @@
       <button id="btnNav" class="nav-start" type="button" hidden>Navigation starten</button>
     </div>
     <div id="windBadge" class="wind-badge" hidden></div>
+    <div id="radarBadge" class="radar-badge" hidden></div>
     <div id="offlineBadge" class="offline-badge" hidden>Offline: nur gespeicherte Touren</div>
     <div id="toast" class="toast" role="status" hidden></div>
     <div id="navTop" class="nav-top" hidden>

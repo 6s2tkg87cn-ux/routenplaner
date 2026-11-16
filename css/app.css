@@ -76,6 +76,26 @@ a { color: inherit; }
 .brand-name { font: 600 23px/1 var(--font-num); letter-spacing: .01em; flex: 1; }
 
 .block { padding: 16px 0; border-top: 1px solid var(--line); }
+/* Reiter: je Reiter nur die zugehörigen Bereiche */
+.tabs { display: flex; gap: 2px; background: var(--field); border-radius: var(--r); padding: 3px; margin-bottom: 14px; position: sticky; top: 0; z-index: 30; box-shadow: 0 0 0 8px var(--panel); }
+.tabs button { flex: 1; min-width: 0; border: 0; background: none; border-radius: 6px; padding: 8px 2px; font-size: 13px; font-weight: 500; color: var(--ink-2); white-space: nowrap; }
+.tabs button[aria-selected=true] { background: var(--ink); color: var(--panel); font-weight: 600; }
+.panel-scroll > [data-tab] { display: none; }
+body[data-tab=plan] .panel-scroll > [data-tab~=plan], body[data-tab=tour] .panel-scroll > [data-tab~=tour], body[data-tab=wetter] .panel-scroll > [data-tab~=wetter],
+body[data-tab=stopps] .panel-scroll > [data-tab~=stopps], body[data-tab=touren] .panel-scroll > [data-tab~=touren] { display: block; }
+.panel-scroll > .tabs + [data-tab], .panel-scroll > section[data-tab]:not(.block-first) { border-top: 0; padding-top: 0; }
+body[data-tab=plan] .panel-scroll > [data-tab~=plan]:not(.block-first) { border-top: 1px solid var(--line); padding-top: 16px; }
+body.has-route .tab-empty { display: none !important; }
+.tab-empty { margin: 0; }
+.climb-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.climb { width: 100%; text-align: left; border: 0; background: var(--field); border-radius: var(--r); padding: 8px 12px; display: grid; grid-template-columns: 1fr auto; gap: 0 10px; }
+.climb:hover { background: var(--field-hover); }
+.climb-main { font-weight: 600; }
+.climb-sub { font-size: 13px; color: var(--ink-2); grid-column: 1; }
+.climb-grade { grid-row: 1 / span 2; grid-column: 2; align-self: center; font: 600 18px var(--font-num); }
+.poi-group { font-size: 13px; color: var(--muted); font-weight: 500; margin: 10px 0 5px; }
+.poi-group:first-child { margin-top: 0; }
+.round-via-clear { position: absolute; right: 2px; top: 2px; }
 .block-first { border-top: 0; padding-top: 2px; }
 .hint { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
 .hint:empty { display: none; }
@@ -186,6 +206,9 @@ body.navigating .me-dot::after { content: ''; position: absolute; left: 50%; top
   .nav-center { bottom: calc(100px + env(safe-area-inset-bottom)); }
 }
 
+.radar-badge { position: absolute; left: 12px; bottom: 12px; z-index: 800; background: var(--panel); color: var(--ink-2); border-radius: var(--r); padding: 6px 10px; font-size: 12px; font-weight: 500; box-shadow: var(--shadow); }
+body.navigating .radar-badge { display: none; }
+@media (max-width: 820px) { .radar-badge { bottom: calc(var(--sheet-vis, 50vh) + 8px); } }
 .offline-badge { position: absolute; top: 12px; left: 60px; height: 40px; display: flex; align-items: center; z-index: 800; background: var(--ink); color: var(--panel); border-radius: var(--r); padding: 7px 12px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow); }
 .tour-item { flex: 1; min-width: 0; text-align: left; border: 0; background: var(--field); border-radius: var(--r); padding: 9px 12px; display: grid; }
 .tour-item:hover { background: var(--field-hover); }

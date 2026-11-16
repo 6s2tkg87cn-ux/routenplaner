@@ -9,6 +9,8 @@ export const POI_CATS = {
   schlafen: { label: 'Übernachtung', icon: '🛏️', filters: ['[tourism~"^(alpine_hut|wilderness_hut|hotel|guest_house|hostel|camp_site)$"]'] },
   laden: { label: 'Supermarkt', icon: '🛒', filters: ['[shop~"^(supermarket|convenience)$"]'] },
   parken: { label: 'Parkplatz kostenlos', icon: '🅿️', filters: ['[amenity=parking][fee=no]', '[amenity=parking][!fee][access!~"^(private|customers|no|permit|delivery)$"]'] },
+  sehens: { label: 'Sehenswertes', icon: '⭐', filters: ['[tourism~"^(viewpoint|attraction)$"]', '[historic~"^(castle|ruins|monument|archaeological_site)$"]', '[natural=peak][name]', '[waterway=waterfall]', '[natural=cave_entrance]'] },
+  bahn: { label: 'Bahnhof', icon: '🚆', filters: ['[railway~"^(station|halt)$"]'] },
   rad: { label: 'Radladen', icon: '🔧', filters: ['[shop=bicycle]', '[amenity=bicycle_repair_station]'] },
 };
 
@@ -21,9 +23,25 @@ function categoriesOf(t) {
   if (['alpine_hut', 'wilderness_hut', 'hotel', 'guest_house', 'hostel', 'camp_site'].includes(t.tourism)) out.push('schlafen');
   if (t.shop === 'supermarket' || t.shop === 'convenience') out.push('laden');
   if (t.shop === 'bicycle' || t.amenity === 'bicycle_repair_station') out.push('rad');
+  if (t.tourism === 'viewpoint' || t.tourism === 'attraction' || /^(castle|ruins|monument|archaeological_site)$/.test(t.historic || '') ||
+    (t.natural === 'peak' && t.name) || t.waterway === 'waterfall' || t.natural === 'cave_entrance') out.push('sehens');
+  if (t.railway === 'station' || t.railway === 'halt') out.push('bahn');
   // Parkplätze: ausdrücklich kostenlos oder ohne Angabe zur Gebühr; private und Kundenparkplätze nicht
   if (t.amenity === 'parking' && (!t.fee || t.fee === 'no') && !/^(private|customers|no|permit|delivery)$/.test(t.access || '')) out.push('parken');
   return out;
+}
+// Gliederung der Auswahl in der App
+export const POI_GROUPS = [['Verpflegung', ['wasser', 'cafe', 'essen', 'laden']], ['Übernachten und Anreise', ['schlafen', 'parken', 'bahn']], ['Unterwegs', ['sehens', 'rad']]];
+function sightKind(t) {
+  if (t.natural === 'peak') return 'Gipfel' + (t.ele ? ', ' + Math.round(parseFloat(t.ele)) + ' m' : '');
+  if (t.tourism === 'viewpoint') return 'Aussichtspunkt';
+  if (t.historic === 'castle') return 'Burg oder Schloss';
+  if (t.historic === 'ruins') return 'Ruine';
+  if (t.historic === 'monument') return 'Denkmal';
+  if (t.historic === 'archaeological_site') return 'Archäologische Stätte';
+  if (t.waterway === 'waterfall') return 'Wasserfall';
+  if (t.natural === 'cave_entrance') return 'Höhle';
+  return 'Sehenswürdigkeit';
 }
 const KIND = { alpine_hut: 'Berghütte', wilderness_hut: 'Schutzhütte ohne Bewirtung', hotel: 'Hotel', guest_house: 'Pension', hostel: 'Hostel', camp_site: 'Campingplatz' };
 
@@ -125,8 +143,9 @@ export async function fetchPois(route, cats, signal, radius = 300) {
         if (seen.has(key)) continue;
         seen.add(key);
         const parking = cat === 'parken';
-        found[cat].push({ lat, lon, cat, name: t.name || (parking ? 'Parkplatz' : KIND[t.tourism] || POI_CATS[cat].label),
-          kind: parking ? (t.fee === 'no' ? 'Kostenloser Parkplatz' : 'Parkplatz, Gebühr nicht angegeben') : KIND[t.tourism] || '',
+        const kind = parking ? (t.fee === 'no' ? 'Kostenloser Parkplatz' : 'Parkplatz, Gebühr nicht angegeben')
+          : cat === 'sehens' ? sightKind(t) : cat === 'bahn' ? (t.railway === 'halt' ? 'Haltepunkt' : 'Bahnhof') : KIND[t.tourism] || '';
+        found[cat].push({ lat, lon, cat, name: t.name || (parking ? 'Parkplatz' : kind || POI_CATS[cat].label), kind,
           unsure: parking && t.fee !== 'no', hours: t.opening_hours || '', d: route.cum[i], off });
       }
     }

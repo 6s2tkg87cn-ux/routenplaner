@@ -232,6 +232,7 @@ export function createProfileChart(host, { onHover, onSelect }) {
   return {
     setRoute(r) { route = r; sel = null; view = null; drag = null; tip.hidden = true; draw(); },
     clearSelection() { sel = null; view = null; draw(); },
+    setSelection(range) { sel = range; view = range; tip.hidden = true; draw(); },
     setCursor(d) { showAt(d, false); },
     setWind(bins) { wind = bins && bins.length ? bins : null; draw(); },
   };

@@ -157,12 +157,90 @@ export async function generateDetours({ start, end, km, directDist, profile, opt
   return cands.sort((a, b) => b.score - a.score).slice(0, 3);
 }
 
+// Runde über einen Wunschpunkt: Start und Wunschpunkt liegen sich gegenüber, zwei seitliche Wegpunkte
+// spannen den Hin- und den Rückweg auf (eine Raute). Ihre Auslenkung bestimmt die Länge.
+async function viaRoundTrips({ start, via, target, climb, profile, options, nogos, signal, onProgress, wind }) {
+  const L = haversine(start.lat, start.lon, via.lat, via.lon);
+  if (L < 300) throw new RouteError('Der Wunschpunkt liegt zu nah am Start.');
+  if (target < L * 2 * 1.15) throw new RouteError('Der Wunschpunkt ist für diese Länge zu weit weg: Hin und zurück sind schon etwa ' + Math.round((L * 2.5) / 1000) + ' km.');
+  const br = bearingDeg(start, via);
+  const mid = (t) => ({ lat: start.lat + (via.lat - start.lat) * t, lon: start.lon + (via.lon - start.lon) * t });
+  const off = (r) => Math.abs(r.dist / target - 1);
+  const route = (v) => fetchRoute({ profile, options, nogos, signal, points: [start, ...v, start] });
+  // a, b: Verhältnis der Auslenkung von Hin- und Rückweg; side: auf welcher Seite der Hinweg liegt
+  const shapes = [{ a: 1, b: 1, side: 1 }, { a: 1, b: 1, side: -1 }, { a: 1.5, b: 0.5, side: 1 }, { a: 0.5, b: 1.5, side: 1 }];
+  let done = 0;
+  const build = async ({ a, b, side }) => {
+    const geom = (w) => 2 * Math.hypot(L / 2, w * a) + 2 * Math.hypot(L / 2, w * b);
+    const viasAt = (w) => {
+      const m = mid(0.5);
+      return [destination(m.lat, m.lon, br + 90 * side, Math.max(50, w * a)), { lat: via.lat, lon: via.lon }, destination(m.lat, m.lon, br - 90 * side, Math.max(50, w * b))];
+    };
+    let f = 1.3, best = null, fails = 0;
+    for (let iter = 0; iter < 3; iter++) {
+      // Auslenkung, bei der die Raute mal Umwegfaktor die Wunschlänge ergibt (Halbierungsverfahren)
+      let lo = 0, hi = target;
+      for (let k = 0; k < 30; k++) { const w = (lo + hi) / 2; if (geom(w) * f > target) hi = w; else lo = w; }
+      const w = lo * (1 - 0.08 * fails);
+      const vias = viasAt(w);
+      let res;
+      try { res = await route(vias); } catch (e) {
+        if (!(e instanceof RouteError) || ++fails > 3) throw e;
+        iter--;
+        continue;
+      }
+      if (!best || off(res) < off(best.route)) best = { route: res, vias };
+      if (off(res) < 0.06) break;
+      f = res.dist / geom(w);
+    }
+    if (!best) throw new RouteError('Kein Vorschlag möglich.');
+    const wide = a > b ? side : b > a ? -side : 0;
+    return { ...best, kind: 'round', bearing: br, clockwise: side > 0,
+      name: 'Über ' + (via.label || 'Wunschpunkt').split(',')[0] + (wide ? ', weiter Bogen im ' + compassName(br + 90 * wide) : side > 0 ? ', Hinweg im ' + compassName(br + 90) : ', Hinweg im ' + compassName(br - 90)) };
+  };
+  const settled = await Promise.allSettled(shapes.map((s) => build(s).finally(() => { done++; if (onProgress) onProgress(done, shapes.length); })));
+  if (signal && signal.aborted) { const e = new Error('abgebrochen'); e.name = 'AbortError'; throw e; }
+  const cands = settled.filter((s) => s.status === 'fulfilled').map((s) => s.value);
+  if (!cands.length) {
+    const first = settled.find((s) => s.status === 'rejected');
+    throw first && first.reason instanceof RouteError ? first.reason : new RouteError('Über diesen Punkt wurde keine Rundtour gefunden.');
+  }
+  const perKm = cands.map((c) => c.route.ascent / (c.route.dist / 1000)), lo = Math.min(...perKm), hi = Math.max(...perKm);
+  const sign = climb === 'hilly' ? 1 : climb === 'flat' ? -1 : 0;
+  cands.forEach((c, i) => { c.score = -off(c.route) * 4 + sign * (hi > lo ? (perKm[i] - lo) / (hi - lo) : 0.5); });
+  cands.sort((x, y) => y.score - x.score);
+  const top = cands.slice(0, 3);
+  await orientForWind(top, wind, { start, target, profile, options, nogos, signal });
+  return top;
+}
+
+// Wind: Runde so herum fahren, dass der Gegenwind am Anfang liegt und der Heimweg Rückenwind hat
+async function orientForWind(top, wind, { start, target, profile, options, nogos, signal }) {
+  if (!wind || wind.speed < 8) return;
+  await Promise.all(top.map(async (c) => {
+    const fwd = lateHeadwind(c.route, wind.from, wind.speed), rev = lateHeadwind(c.route, wind.from, wind.speed, true);
+    let late = fwd;
+    if (rev < fwd - 2) {
+      try {
+        const vias = [...c.vias].reverse();
+        const r = await fetchRoute({ profile, options, nogos, signal, points: [start, ...vias, start] });
+        if (Math.abs(r.dist / target - 1) < Math.abs(c.route.dist / target - 1) + 0.06) {
+          c.route = r; c.vias = vias; c.clockwise = !c.clockwise;
+          late = lateHeadwind(r, wind.from, wind.speed);
+        }
+      } catch (e) { if (e.name === 'AbortError') throw e; }
+    }
+    c.windNote = late < -2 ? 'Rückenwind auf dem Heimweg' : late > 2 ? 'Gegenwind auf dem Heimweg' : '';
+  }));
+}
+
 /**
  * Erzeugt Vorschläge für eine Rundtour.
  * direction: Grad (0 = Norden) oder null für beliebig. climb: 'flat' | 'any' | 'hilly'.
  */
-export async function generateRoundTrips({ start, km, direction, climb, profile, options, nogos, signal, onProgress, wind }) {
+export async function generateRoundTrips({ start, km, direction, climb, profile, options, nogos, signal, onProgress, wind, via }) {
   const target = km * 1000;
+  if (via) return viaRoundTrips({ start, via, target, climb, profile, options, nogos, signal, onProgress, wind });
   // Ohne Wunschrichtung und bei spürbarem Wind geht es zuerst gegen den Wind hinaus:
   // Der fernste Punkt liegt dann dort, wo der Wind herkommt, und der Heimweg hat Rückenwind.
   const windy = wind && wind.speed >= 8;
@@ -192,23 +270,6 @@ export async function generateRoundTrips({ start, km, direction, climb, profile,
   cands.sort((a, b) => b.score - a.score);
   const top = cands.slice(0, 3);
 
-  // Wind: Runde so herum fahren, dass der Gegenwind am Anfang liegt und der Heimweg Rückenwind hat
-  if (wind && wind.speed >= 8) {
-    await Promise.all(top.map(async (c) => {
-      const fwd = lateHeadwind(c.route, wind.from, wind.speed), rev = lateHeadwind(c.route, wind.from, wind.speed, true);
-      let late = fwd;
-      if (rev < fwd - 2) {
-        try {
-          const vias = [...c.vias].reverse();
-          const r = await fetchRoute({ profile, options, nogos, signal, points: [start, ...vias, start] });
-          if (Math.abs(r.dist / target - 1) < Math.abs(c.route.dist / target - 1) + 0.06) {
-            c.route = r; c.vias = vias; c.clockwise = !c.clockwise;
-            late = lateHeadwind(r, wind.from, wind.speed);
-          }
-        } catch (e) { if (e.name === 'AbortError') throw e; }
-      }
-      c.windNote = late < -2 ? 'Rückenwind auf dem Heimweg' : late > 2 ? 'Gegenwind auf dem Heimweg' : '';
-    }));
-  }
+  await orientForWind(top, wind, { start, target, profile, options, nogos, signal });
   return top;
 }

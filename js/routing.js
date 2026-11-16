@@ -228,10 +228,91 @@ export function classifyTags(tagStr) {
 
 /** Fahr- oder Gehzeit in Stunden. Wandern nach DIN 33466: 300 hm/h bergauf, 500 hm/h bergab, dazu die Strecke. */
 export function travelHours(route, profile, speed) {
-  const flat = route.dist / 1000 / speed;
-  if (!PROFILES[profile].foot) return flat;
-  const vert = route.ascent / 300 + route.descent / 500;
-  return Math.max(flat, vert) + Math.min(flat, vert) / 2;
+  if (PROFILES[profile].foot) {
+    const flat = route.dist / 1000 / speed, vert = route.ascent / 300 + route.descent / 500;
+    return Math.max(flat, vert) + Math.min(flat, vert) / 2;
+  }
+  const key = profile + ':' + speed;
+  if (route._time && route._time.key === key) return route._time.hours;
+  const hours = rideHours(route, profile, speed);
+  route._time = { key, hours };
+  return hours;
+}
+
+// Fahrzeit mit dem Rad aus Steigung und Untergrund: Aus dem Tempo in der Ebene wird die Leistung bestimmt,
+// die du dort trittst. Mit dieser Leistung wird für jedes Stück der Strecke das Tempo berechnet
+// (Steigung, Rollwiderstand des Untergrunds, Luftwiderstand), bergab begrenzt durch Bremsen.
+const BIKE = {
+  rennrad: { cda: 0.32, crr: 0.005, vmax: 60, mass: 84 },
+  gravel: { cda: 0.38, crr: 0.007, vmax: 48, mass: 86 },
+  alltag: { cda: 0.5, crr: 0.008, vmax: 38, mass: 92 },
+};
+const ROLL = { asphalt: 1, pflaster: 1.8, schotter: 2.2, natur: 3.2, unbekannt: 1.6 };
+const VCAP = { asphalt: 99, pflaster: 28, schotter: 32, natur: 22, unbekannt: 35 }; // km/h, was der Untergrund zulässt
+
+function rideHours(route, profile, speedFlat) {
+  const b = BIKE[profile] || BIKE.alltag, g = 9.81, rho = 1.2;
+  const v0 = speedFlat / 3.6;
+  const power = b.mass * g * b.crr * v0 + 0.5 * rho * b.cda * v0 ** 3; // Leistung am Hinterrad in der Ebene
+  const step = Math.max(50, Math.min(150, route.dist / 400));
+  let t = 0, si = 0;
+  for (let d = 0; d < route.dist; d += step) {
+    const d1 = Math.min(route.dist, d + step), len = d1 - d;
+    if (len <= 0) break;
+    const a = Math.max(0, d - 40), z = Math.min(route.dist, d1 + 40);
+    const slope = route.hasEle ? (pointAt(route, z).ele - pointAt(route, a).ele) / (z - a) : 0;
+    while (si < route.sections.length - 1 && route.sections[si].to < d + len / 2) si++;
+    const surf = route.sections.length ? route.sections[si].surface : 'asphalt';
+    const crr = b.crr * (ROLL[surf] || 1);
+    // Tempo, bei dem die Leistung gerade reicht (Halbierungsverfahren)
+    let lo = 0.8, hi = 30;
+    for (let k = 0; k < 24; k++) {
+      const v = (lo + hi) / 2;
+      const need = b.mass * g * (slope + crr) * v + 0.5 * rho * b.cda * v ** 3;
+      // bergauf tritt man erfahrungsgemäß etwas kräftiger als in der Ebene (bis etwa ein Viertel mehr)
+      if (need > power * (1 + Math.max(0, Math.min(0.25, slope * 4)))) hi = v; else lo = v;
+    }
+    let v = (lo + hi) / 2;
+    // bergab wird gebremst: je steiler und je loser der Untergrund, desto früher
+    let cap = Math.min(b.vmax, VCAP[surf] || 99) / 3.6;
+    if (slope < -0.06) cap *= Math.max(0.45, 1 + (slope + 0.06) * 5);
+    v = Math.max(0.9, Math.min(v, cap)); // unter 3 km/h wird geschoben
+    t += len / v;
+  }
+  return t / 3600;
+}
+
+/**
+ * Anstiege der Strecke: zusammenhängende Steigungen, kurze Flachstücke und kleine Senken gehören dazu.
+ * Liefert je Anstieg Anfang, Ende, Höhenmeter, Länge, Durchschnitts- und Maximalsteigung.
+ */
+export function findClimbs(route, foot = false) {
+  if (!route.hasEle || route.dist < 500) return [];
+  const step = 50, n = Math.floor(route.dist / step);
+  const e = [];
+  for (let i = 0; i <= n; i++) e.push(pointAt(route, i * step).ele);
+  const minGain = foot ? 60 : 30, minAvg = foot ? 4 : 2.5, climbs = [];
+  let start = 0, top = 0;
+  const close = () => {
+    // flachen Anlauf vor dem eigentlichen Anstieg abschneiden
+    const tol = Math.max(3, (e[top] - e[start]) * 0.03);
+    for (let i = top; i > start; i--) if (e[i] <= e[start] + tol) { start = i; break; }
+    const gain = e[top] - e[start], len = (top - start) * step;
+    if (len >= 300 && gain >= minGain && (gain / len) * 100 >= minAvg) {
+      let max = 0;
+      for (let i = start; i + 4 <= top; i++) max = Math.max(max, ((e[i + 4] - e[i]) / (4 * step)) * 100);
+      climbs.push({ from: start * step, to: top * step, gain, len, avg: (gain / len) * 100, max: Math.max(max, (gain / len) * 100) });
+    }
+  };
+  for (let i = 1; i <= n; i++) {
+    if (e[i] > e[top]) top = i;
+    const gain = e[top] - e[start], drop = e[top] - e[i];
+    if (e[i] < e[start] && top === start) { start = i; top = i; continue; }
+    // Der Anstieg endet, wenn es deutlich wieder hinuntergeht
+    if (drop > Math.max(12, gain * 0.2)) { close(); start = i; top = i; }
+  }
+  close();
+  return climbs;
 }
 
 export function parseRoute(geojson) {

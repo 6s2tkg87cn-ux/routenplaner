@@ -15,6 +15,8 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 
 - Hin und zurück sowie automatische Rundtouren nach Wunschlänge, Richtung und Höhenmeter-Vorliebe
 - Umweg von A nach B auf Wunschlänge, Stopps an der Strecke (Trinkwasser, Café, Einkehr, Supermarkt, Radladen)
+- Anstiege einzeln ausgewiesen, Fahrzeit aus Steigung und Untergrund berechnet
+- Tour-Link zum Teilen, Regenradar als Überlagerung, Rundtour über einen Wunschpunkt
 - Touren speichern, GPX-Import
 - Navigation (nur am Handy oder Tablet): Karte folgt dem Standort in Fahrtrichtung, Abbiegehinweise, Neuberechnung bei Abweichung (mit Internet)
 - Offline-Modus: gespeicherte Tour mit Standardkarte (Streifen um die Route) und Stopps aufs Gerät laden, unterwegs mit Standort ansehen
@@ -28,6 +30,7 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 | Karten | [OpenFreeMap](https://openfreemap.org) (Standard), [CyclOSM](https://www.cyclosm.org), [OpenTopoMap](https://opentopomap.org), TopPlusOpen (BKG), basemap.at, Esri (Satellit); Routen-Überlagerung von [Waymarked Trails](https://waymarkedtrails.org) |
 | Wetter | [Open-Meteo](https://open-meteo.com) |
 | Stopps | [Overpass API](https://overpass-api.de) |
+| Regenradar | [RainViewer](https://www.rainviewer.com) |
 | Suche | [Photon](https://photon.komoot.io) |
 | Kartendaten | © [OpenStreetMap](https://www.openstreetmap.org/copyright)-Mitwirkende |
 
