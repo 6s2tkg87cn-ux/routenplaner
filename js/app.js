@@ -12,7 +12,7 @@ import { createProfileChart } from './elevation.js';
 import { generateRoundTrips, generateDetours } from './roundtrip.js';
 import { POI_CATS, POI_GROUPS, fetchPois, PoiError } from './pois.js';
 import { listOffline, planDownload, runDownload, removeDownload } from './offline.js';
-import { searchRoutes, loadRouteTrack, previewRoute, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
+import { searchRoutes, loadRouteTrack, sliceTrack, previewRoute, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
 import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
@@ -1156,6 +1156,16 @@ function initRound() {
 // ---------------------------------------------------------------- Routen (eingetragene Rad- und Wanderwege)
 
 let rtList = [], rtSel = null, rtSec = null, rtCtrl = null, rtMarkers = [], rtLoopCands = [];
+
+// Beschreibung eines Abschnitts; bei Rundwegen kann er über das Ende der Eintragung hinweglaufen
+function secDescription(from, to, dist, closed) {
+  const len = Math.abs(to - from), whole = len > dist - 50;
+  if (closed && whole) return `Ganze Runde, ${kmText(len)} km`;
+  if (whole) return `Ganze Route, ${kmText(len)} km` + (to < from ? ', in Gegenrichtung' : '');
+  const norm = (d) => (closed ? ((d % dist) + dist) % dist : d);
+  const a = norm(from), z = norm(to);
+  return `km ${kmText(a)} bis ${kmText(z)}, ${kmText(len)} km` + (to < from ? ', in Gegenrichtung' : '');
+}
 const kmText = (m) => fmt(m / 1000, m < 100000 ? 1 : 0);
 
 function initRoutes() {
@@ -1289,6 +1299,7 @@ async function openRoute(item) {
     rtSel = { item, track };
     rtSec = { from: 0, to: track.dist };
     rtLoopCands = [];
+    if (track.closed) { state.rtOpts = { approach: true, back: true }; $('rtApproach').checked = true; $('rtBackSw').checked = true; save(); }
     renderRtSel(); renderRtMap(); fitTrack();
     $('panelScroll').scrollTop = 0;
   } catch (e) {
@@ -1310,14 +1321,13 @@ function renderRtSel() {
   if (!rtSel) return;
   const { item, track } = rtSel;
   $('rtName').textContent = item.name;
-  const meta = [routeLabel({ ...item, km: 0 }) + `, ${kmText(track.dist)} km zusammenhängend eingetragen.`];
+  const meta = [routeLabel({ ...item, km: 0 }) + (track.closed ? ', Rundweg' : '') + `, ${kmText(track.dist)} km zusammenhängend eingetragen.`];
   if (track.gaps.length) meta.push(`${track.gaps.length} Lücke${track.gaps.length > 1 ? 'n' : ''} in den Daten, überbrückt mit deinem Profil.`);
   if (item.km && track.dist / 1000 < item.km * 0.8) meta.push(`Offiziell ${fmt(item.km)} km. Die Daten sind nicht durchgehend; gezeigt wird nur ein zusammenhängender Teil.`);
   $('rtMeta').replaceChildren(meta.join(' ') + ' ', track.website || item.website ? h('a', { href: track.website || item.website, target: '_blank', rel: 'noopener noreferrer', text: 'Offizielle Seite' }) : '');
-  const len = Math.abs(rtSec.to - rtSec.from), whole = Math.min(rtSec.from, rtSec.to) < 1 && Math.max(rtSec.from, rtSec.to) > track.dist - 1;
-  $('rtSecText').textContent = (whole ? 'Ganze Route' : `km ${kmText(Math.min(rtSec.from, rtSec.to))} bis ${kmText(Math.max(rtSec.from, rtSec.to))}`) + `, ${kmText(len)} km` +
-    (rtSec.to < rtSec.from ? ', in Gegenrichtung' : '');
-  const st = state.waypoints[0];
+  const whole = Math.abs(rtSec.to - rtSec.from) > track.dist - 50, st = state.waypoints[0];
+  $('rtSecText').textContent = secDescription(rtSec.from, rtSec.to, track.dist, track.closed) +
+    (track.closed && whole && st && st.lat != null ? '. Einstieg dort, wo die Runde deinem Start am nächsten ist.' : '');
   $('rtStartNote').textContent = st && st.lat != null ? 'Start: ' + st.label.split(',')[0] : 'Kein Start gesetzt. Tippe neben die Route auf die Karte und wähle „Als Start“.';
   renderRtLoops();
 }
@@ -1329,10 +1339,11 @@ function renderRtMap() {
   const show = state.tab === 'routen' && rtSel;
   setOverlay('rtrack', show ? { type: 'FeatureCollection', features: [lineFeature(rtSel.track)] } : EMPTY);
   if (!show) { setOverlay('rsec', EMPTY); return; }
-  const t = rtSel.track, a = Math.min(rtSec.from, rtSec.to), b = Math.max(rtSec.from, rtSec.to);
-  setOverlay('rsec', { type: 'FeatureCollection', features: [sliceFeature(t, a, b, {})] });
-  for (const [d, text, title] of [[rtSec.from, '▶', 'Anfang des Abschnitts'], [rtSec.to, '■', 'Ende des Abschnitts']]) {
-    const p = pointAt(t, d);
+  const t = rtSel.track, sl = sliceTrack(t, rtSec.from, rtSec.to);
+  setOverlay('rsec', { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: sl.pts.map((q) => [q.lon, q.lat]) } }] });
+  const whole = Math.abs(rtSec.to - rtSec.from) > t.dist - 50;
+  if (t.closed && whole) return; // Einstieg ergibt sich erst aus dem Start
+  for (const [p, text, title] of [[sl.pts[0], '▶', 'Anfang des Abschnitts'], [sl.pts[sl.pts.length - 1], '■', 'Ende des Abschnitts']]) {
     rtMarkers.push(new maplibregl.Marker({ element: h('div', { class: 'pin pin-sec', text, title }) }).setLngLat([p.lon, p.lat]).addTo(map));
   }
 }
@@ -1360,7 +1371,7 @@ function rtStartMenu(lat, lon) {
 function applyRouteTour(from, to, approach, back) {
   if (!rtSel) return;
   const start = state.waypoints[0];
-  state.routeTour = { id: rtSel.item.id, name: rtSel.item.name, from, to, approach: !!approach, back: !!back };
+  state.routeTour = { id: rtSel.item.id, name: rtSel.item.name, from, to, approach: !!approach, back: !!back, dist: rtSel.track.dist, closed: !!rtSel.track.closed };
   state.mode = 'route';
   state.loop = false;
   state.waypoints = [start && start.lat != null ? start : emptyWp(), emptyWp()];
@@ -1389,6 +1400,7 @@ async function calcRouteTour() {
     route = r;
     hideToast();
     showRoute();
+    renderRtInfo();
     if (r.eleMissing) toast('Die Höhen für den Routenabschnitt konnten nicht geladen werden. Höhenprofil und Fahrzeit sind dort ungenau.', true);
     else if (r.bridged) toast(`${r.bridged} Lücke${r.bridged > 1 ? 'n' : ''} in den Routendaten mit deinem Profil überbrückt.`);
   } catch (e) {
@@ -1407,7 +1419,8 @@ function renderRtInfo() {
   if (!rt) return;
   $('rtInfoName').textContent = rt.name;
   const extra = [rt.approach && state.waypoints[0].lat != null ? 'mit Anfahrt' : '', rt.back ? 'zurück zum Start' : ''].filter(Boolean).join(', ');
-  $('rtInfoSub').textContent = `Abschnitt km ${fmt(Math.min(rt.from, rt.to) / 1000, 1)} bis ${fmt(Math.max(rt.from, rt.to) / 1000, 1)}` + (rt.to < rt.from ? ' in Gegenrichtung' : '') + (extra ? ', ' + extra : '');
+  const dist = route && route.secLen ? Math.max(route.secLen, Math.abs(rt.to - rt.from)) : Math.abs(rt.to - rt.from);
+  $('rtInfoSub').textContent = secDescription(rt.from, rt.to, rt.dist || dist, !!rt.closed) + (route && route.entry != null ? ', Einstieg nahe deinem Start' : '') + (extra ? ', ' + extra : '');
 }
 
 async function editRouteTour() {
@@ -1815,7 +1828,7 @@ function initNav() {
 // ---------------------------------------------------------------- Export
 
 function defaultTourName() {
-  if (state.routeTour) { const rt = state.routeTour; return `${rt.name}, km ${fmt(Math.min(rt.from, rt.to) / 1000)} bis ${fmt(Math.max(rt.from, rt.to) / 1000)}`; }
+  if (state.routeTour) { const rt = state.routeTour; return rt.closed && Math.abs(rt.to - rt.from) > (rt.dist || 0) - 50 ? `${rt.name} (Runde)` : `${rt.name}, ${secDescription(rt.from, rt.to, rt.dist || Math.abs(rt.to - rt.from), !!rt.closed).split(',')[0]}`; }
   const pts = state.waypoints.filter((w) => w.lat != null);
   if (pts.length < 2 && !state.loop) return 'Tour';
   const short = (s) => s.split(',')[0];

@@ -229,11 +229,24 @@ export function chainWays(ways) {
   }
   const n = pts.length, lat = new Float64Array(n), lon = new Float64Array(n), cum = new Float64Array(n);
   for (let i = 0; i < n; i++) { lat[i] = pts[i].lat; lon[i] = pts[i].lon; if (i) cum[i] = cum[i - 1] + hav(pts[i - 1], pts[i]); }
-  return { lat, lon, cum, n, dist: cum[n - 1], ele: new Float64Array(n), segWay: Int32Array.from(segWay), wayTags, gaps };
+  // Rundweg: Ende liegt wieder am Anfang
+  const closed = n > 2 && hav(pts[0], pts[n - 1]) < 500 && cum[n - 1] > 2000;
+  return { lat, lon, cum, n, dist: cum[n - 1], ele: new Float64Array(n), segWay: Int32Array.from(segWay), wayTags, gaps, closed };
 }
 
-/** Punkte und Wegzuordnung eines Abschnitts. Ist to < from, wird der Abschnitt in Gegenrichtung gefahren. */
+/**
+ * Punkte und Wegzuordnung eines Abschnitts. Ist to < from, wird der Abschnitt in Gegenrichtung gefahren.
+ * Bei Rundwegen darf der Abschnitt über Anfang oder Ende der Eintragung hinweglaufen (to > Länge oder to < 0).
+ */
 export function sliceTrack(track, from, to) {
+  const D = track.dist;
+  if (track.closed && (to > D + 1 || to < -1)) {
+    const fwd = to > from;
+    const a = fwd ? sliceTrack(track, from, D) : sliceTrack(track, from, 0);
+    const b = fwd ? sliceTrack(track, 0, Math.min(D, to - D)) : sliceTrack(track, D, Math.max(0, D + to));
+    const join = hav(a.pts[a.pts.length - 1], b.pts[0]) > 30;
+    return { pts: [...a.pts, ...(join ? b.pts : b.pts.slice(1))], segs: [...a.segs, ...(join ? [-1] : []), ...b.segs] };
+  }
   const a = Math.max(0, Math.min(from, to)), b = Math.min(track.dist, Math.max(from, to));
   const pa = pointAt(track, a), pb = pointAt(track, b), last = track.segWay.length - 1;
   const pts = [{ lat: pa.lat, lon: pa.lon }], segs = [];
@@ -383,6 +396,13 @@ function synthetic(pts, segs, ele, i0, i1, wayTags) {
  */
 export async function buildRouteTour({ track, from, to, start, back, profile, options, nogos = [], signal }) {
   if (Math.abs(to - from) < 200) throw new RouteError('Der Abschnitt ist zu kurz. Wähle Anfang und Ende weiter auseinander.');
+  // Ganzer Rundweg mit eigenem Start: dort einsteigen, wo die Route dem Start am nächsten ist, einmal herum
+  // und am selben Punkt wieder aussteigen. Der Rückweg ist dann einfach der kürzeste Weg nach Hause.
+  let entry = null;
+  if (track.closed && start && Math.abs(to - from) > track.dist - 50) {
+    const P = projectOnRoute(track, start.lat, start.lon).d, dir = to >= from ? 1 : -1;
+    from = P; to = P + dir * track.dist; entry = P;
+  }
   const { pts, segs } = sliceTrack(track, from, to);
   const secStart = pts[0], secEnd = pts[pts.length - 1];
   const leg = (points, extra = []) => fetchRoute({ profile, options, signal, points, nogos: [...nogos, ...extra], raw: true });
@@ -405,10 +425,13 @@ export async function buildRouteTour({ track, from, to, start, back, profile, op
   if (segs.length > r0) runs.push({ i0: r0, i1: segs.length });
   // Rückweg: Abschnitt sperren, damit er nicht noch einmal gefahren wird
   let backJob = null;
-  if (back) {
+  if (back && entry != null) {
+    if (hav(secEnd, start) > 150) backJob = leg([secEnd, start]);
+  } else if (back) {
     const target = useStart ? start : secStart;
     const blocks = [], total = Math.abs(to - from), spacing = Math.max(200, total / 110);
-    for (let d = Math.min(from, to) + 500; d < Math.max(from, to) - 500; d += spacing) { const p = pointAt(track, d); blocks.push({ lat: p.lat, lon: p.lon, radius: 35 }); }
+    const wrap = (d) => (track.closed ? ((d % track.dist) + track.dist) % track.dist : d);
+    for (let d = Math.min(from, to) + 500; d < Math.max(from, to) - 500; d += spacing) { const p = pointAt(track, wrap(d)); blocks.push({ lat: p.lat, lon: p.lon, radius: 35 }); }
     if (hav(secEnd, target) > 150) backJob = leg([secEnd, target], blocks).catch((e) => { if (e.name === 'AbortError' || !blocks.length) throw e; return leg([secEnd, target]); });
   }
   const ele = await eleJob;
@@ -425,6 +448,7 @@ export async function buildRouteTour({ track, from, to, start, back, profile, op
   route.eleMissing = !ele;
   route.bridged = bridged;
   route.secLen = Math.abs(to - from);
+  route.entry = entry;
   return route;
 }
 
@@ -435,13 +459,14 @@ export async function buildRouteTour({ track, from, to, start, back, profile, op
  */
 export async function suggestRouteLoops({ track, start, km, profile, options, nogos, signal, onProgress }) {
   const L = km * 1000, P = projectOnRoute(track, start.lat, start.lon).d;
-  const airTo = (d) => { const q = pointAt(track, d); return haversine(start.lat, start.lon, q.lat, q.lon); };
+  const wrap = (d) => (track.closed ? ((d % track.dist) + track.dist) % track.dist : d);
+  const airTo = (d) => { const q = pointAt(track, wrap(d)); return haversine(start.lat, start.lon, q.lat, q.lon); };
   const approach = 1.3 * airTo(P);
   if (approach > L * 0.6) throw new RouteError('Die Route liegt für diese Länge zu weit vom Start entfernt. Wähle eine größere Länge oder einen Start näher an der Route.');
   const build = (from, to) => buildRouteTour({ track, from, to, start, back: true, profile, options, nogos, signal });
   let done = 0;
   const jobs = [1, -1].map(async (dir) => {
-    const xmax = dir > 0 ? track.dist - P : P;
+    const xmax = track.closed ? track.dist - 500 : dir > 0 ? track.dist - P : P;
     if (xmax < 2000) return null;
     const est = (x) => approach + x + 1.3 * airTo(P + dir * x);
     const pick = (fac) => {
@@ -458,7 +483,7 @@ export async function suggestRouteLoops({ track, start, km, profile, options, no
     }
     done++;
     if (onProgress) onProgress(done, 2);
-    const a = pointAt(track, P), z = pointAt(track, P + dir * x);
+    const a = pointAt(track, P), z = pointAt(track, wrap(P + dir * Math.min(x, 3000)));
     return { from: P, to: P + dir * x, route: r, name: 'Auf der Route Richtung ' + compassName(bearing(a, z)) };
   });
   const res = (await Promise.allSettled(jobs)).filter((s) => s.status === 'fulfilled' && s.value).map((s) => s.value);
