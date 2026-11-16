@@ -12,7 +12,7 @@ import { createProfileChart } from './elevation.js';
 import { generateRoundTrips, generateDetours } from './roundtrip.js';
 import { POI_CATS, POI_GROUPS, fetchPois, PoiError } from './pois.js';
 import { listOffline, planDownload, runDownload, removeDownload } from './offline.js';
-import { searchRoutes, loadRouteTrack, previewRoute, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
+import { searchRoutes, loadRouteTrack, previewRoute, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
 import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
@@ -1192,12 +1192,22 @@ async function runRtSearch() {
     if (ctrl !== rtCtrl) return;
     rtStatus(rtList.length ? '' : 'Hier ist keine Route eingetragen. Verschiebe die Karte oder zoome heraus.');
     rtSel = null;
+    rtOpen = {};
     renderRtList(); renderRtSel(); renderRtMap();
+    // Vorschau aller Routen im Hintergrund laden; danach nach Länge im Ausschnitt sortieren
+    const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()];
+    prefetchPreviews(rtList.map((r) => r.id), bbox, ctrl.signal).then((km) => {
+      if (ctrl !== rtCtrl) return;
+      for (const r of rtList) if (km.has(r.id)) r.visKm = km.get(r.id);
+      rtList.sort(byImportance);
+      renderRtList();
+    }).catch(() => { /* Vorschau lädt dann beim Überfahren einzeln */ });
   } catch (e) {
     if (e.name !== 'AbortError') rtStatus(e.message || 'Die Routen konnten nicht geladen werden.');
   } finally { if (ctrl === rtCtrl) $('btnRtSearch').disabled = false; }
 }
 
+let rtOpen = {}; // vom Nutzer auf- oder zugeklappte Gruppen bleiben so, auch wenn die Liste neu sortiert wird
 const RT_GROUPS = [['bicycle', 'Radwege'], ['mtb', 'MTB-Strecken'], ['hiking', 'Wanderwege']];
 const RT_LEVELS = ['International', 'National', 'Regional', 'Lokal', 'Ohne Einstufung'];
 
@@ -1214,13 +1224,14 @@ function renderRtList() {
   const item = (r, small) => h('li', {}, h('button', { type: 'button', class: 'cand', onclick: () => openRoute(r),
     onmouseenter: () => schedulePreview(r), onmouseleave: () => cancelPreview(), onfocus: () => schedulePreview(r), onblur: () => cancelPreview() },
   h('span', { class: 'cand-top' }, h('span', { class: 'cand-name', text: r.name }), r.round ? h('span', { class: 'rt-round', text: 'Rundweg' }) : null),
-  small ? null : h('span', { class: 'cand-nums' }, h('span', { text: routeLabel(r) }))));
+  small ? null : h('span', { class: 'cand-nums' }, h('span', { text: routeLabel(r) + (r.visKm >= 0.5 ? `, ${fmt(r.visKm)} km im Ausschnitt` : '') }))));
+  const fold = (key, def, el) => { el.open = key in rtOpen ? rtOpen[key] : def; el.addEventListener('toggle', () => { rtOpen[key] = el.open; }); return el; };
   for (const [kind, title] of RT_GROUPS) {
     const items = list.filter((r) => kindOf(r) === kind);
     if (!items.length) continue;
     const top = items.filter((r) => !r.parents.some((p) => ids.has(p)));
-    const group = h('details', { class: 'rt-group', open: kind === main || items.length === list.length },
-      h('summary', {}, h('span', { text: title }), h('span', { class: 'rt-count', text: String(items.length) })));
+    const group = fold(kind, kind === main || items.length === list.length, h('details', { class: 'rt-group' },
+      h('summary', {}, h('span', { text: title }), h('span', { class: 'rt-count', text: String(items.length) }))));
     RT_LEVELS.forEach((lv, rank) => {
       const lvItems = top.filter((r) => r.rank === rank);
       if (!lvItems.length) return;
@@ -1229,13 +1240,13 @@ function renderRtList() {
         ul.append(item(r));
         const kids = r.children.map((c) => byId.get(c)).filter(Boolean);
         if (kids.length) {
-          const sub = h('details', { class: 'rt-sub' }, h('summary', { text: `${kids.length} Teilabschnitt${kids.length > 1 ? 'e' : ''}` }));
+          const sub = fold('sub' + r.id, false, h('details', { class: 'rt-sub' }, h('summary', { text: `${kids.length} Teilabschnitt${kids.length > 1 ? 'e' : ''}` })));
           sub.append(h('ul', { class: 'cand-list' }, ...kids.map((k) => item(k, true))));
           ul.append(h('li', {}, sub));
         }
       }
       // lokale Routen sind oft sehr viele: eingeklappt
-      if (rank >= 3 && lvItems.length > 4) group.append(h('details', { class: 'rt-level-fold' }, h('summary', { text: `${lv} (${lvItems.length})` }), ul));
+      if (rank >= 3 && lvItems.length > 4) group.append(fold(kind + rank, false, h('details', { class: 'rt-level-fold' }, h('summary', { text: `${lv} (${lvItems.length})` }), ul)));
       else group.append(h('div', { class: 'rt-level', text: lv }), ul);
     });
     host.append(group);

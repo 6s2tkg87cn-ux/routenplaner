@@ -13,11 +13,17 @@ export function routeLabel(r) {
   return (lvl ? lvl + 'e ' : '') + (KIND_LABEL[r.kind] || 'Route') + (r.km ? `, ${r.km.toLocaleString('de-DE', { maximumFractionDigits: 0 })} km` : '');
 }
 
+// Wichtigkeit: erst die Einstufung (international vor lokal), dann die Länge im Kartenausschnitt (sobald bekannt),
+// sonst die Gesamtlänge (eingetragen oder geschätzt aus der Zahl der Wegstücke), zuletzt der Name.
+export function byImportance(a, c) {
+  return a.rank - c.rank || (c.visKm ?? -1) - (a.visKm ?? -1) || (c.km || c.size * 0.4) - (a.km || a.size * 0.4) || a.name.localeCompare(c.name, 'de');
+}
+
 /** Routen im Kartenausschnitt [Süd, West, Nord, Ost]: Rad-, MTB- und Wanderrouten. Übergeordnete Routen werden mitgeliefert. */
 export async function searchRoutes(bbox, profile, signal) {
   const kinds = 'bicycle|mtb|hiking|foot';
   const b = bbox.map((v) => v.toFixed(4)).join(',');
-  const q = `[out:json][timeout:25];rel[type=route][route~"^(${kinds})$"](${b})->.r;.r out tags;rel(br.r)[type~"^(route|superroute)$"]->.p;.p out body;`;
+  const q = `[out:json][timeout:25];rel[type=route][route~"^(${kinds})$"](${b})->.r;.r out body;rel(br.r)[type~"^(route|superroute)$"]->.p;.p out body;`;
   const json = await overpass(q, signal, 40000);
   const map = new Map();
   for (const e of json.elements || []) {
@@ -28,13 +34,14 @@ export async function searchRoutes(bbox, profile, signal) {
       id: e.id, name: t.name || t['name:de'] || t.ref || '', ref: t.ref || '', kind: t.route || '', rank: RANK[t.network] ?? 4,
       km: parseFloat(String(t.distance || '').replace(',', '.')) || 0, website: t.website || t.url || '', parents: [], children: [],
       // Rundweg: ausdrücklich so eingetragen, oder der Name sagt es
+      size: 0, // Zahl der Wegstücke: Maß für die Länge, solange nichts Genaueres bekannt ist
       round: t.roundtrip === 'yes' || (t.roundtrip !== 'no' && /rund(weg|wanderweg|tour|kurs|e\b)|runde\b|\bloop\b/i.test(t.name || '')),
     };
-    if (e.members) for (const m of e.members) if (m.type === 'relation') item.children.push(m.ref);
+    if (e.members) for (const m of e.members) { if (m.type === 'relation') item.children.push(m.ref); else if (m.type === 'way') item.size++; }
     map.set(e.id, item);
   }
-  for (const it of map.values()) for (const c of it.children) { const ch = map.get(c); if (ch && !ch.parents.includes(it.id)) ch.parents.push(it.id); }
-  return [...map.values()].filter((r) => r.name).sort((a, c) => a.rank - c.rank || a.name.localeCompare(c.name, 'de')).slice(0, 200)
+  for (const it of map.values()) for (const c of it.children) { const ch = map.get(c); if (ch && !ch.parents.includes(it.id)) { ch.parents.push(it.id); it.size += ch.size; } }
+  return [...map.values()].filter((r) => r.name).sort(byImportance).slice(0, 200)
     .map((r) => ({ ...r, parentNames: r.parents.map((id) => map.get(id)).filter((x) => x && x.name).map((x) => x.name) }));
 }
 
@@ -76,10 +83,56 @@ export async function loadRouteTrack(id, signal) {
 
 // ---------------------------------------------------------------- Schnelle Vorschau
 
-const prevCache = new Map();
+const prevCache = new Map(), prefetched = new Map();
+
+function linesOf(ways) {
+  const lines = [];
+  let len = 0;
+  for (const w of ways) {
+    let cur = [];
+    for (const g of w.geometry || []) {
+      if (g && Number.isFinite(g.lat)) {
+        if (cur.length) { const q = cur[cur.length - 1]; len += haversine(q[1], q[0], g.lat, g.lon); }
+        cur.push([g.lon, g.lat]);
+      } else { if (cur.length > 1) lines.push(cur); cur = []; }
+    }
+    if (cur.length > 1) lines.push(cur);
+  }
+  const fc = { type: 'FeatureCollection', features: lines.length ? [{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: lines } }] : [] };
+  return { fc, km: len / 1000 };
+}
+
 /**
- * Grobe Vorschau einer Route für den Kartenausschnitt: nur die Wegstücke im Ausschnitt, ohne Angaben dazu.
- * Ist die Route schon ganz geladen, wird die fertige Strecke genommen.
+ * Vorschau für alle Routen einer Liste auf einmal laden (nur die Wegstücke im Kartenausschnitt).
+ * Liefert je Route die Länge im Ausschnitt; die Linien liegen danach für die Vorschau bereit.
+ */
+export async function prefetchPreviews(ids, bbox, signal) {
+  if (!ids.length) return new Map();
+  const b = bbox.map((v) => v.toFixed(3)).join(',');
+  const q = `[out:json][timeout:25];rel(id:${ids.join(',')})->.t;rel(r.t)->.c;rel(r.c)->.c2;(.t;.c;.c2;)->.a;.a out body;way(r.a)(${b});out geom qt;`;
+  const json = await overpass(q, signal, 30000, 3);
+  const rels = new Map(), ways = new Map();
+  for (const e of json.elements || []) { if (e.type === 'relation') rels.set(e.id, e); else if (e.type === 'way') ways.set(e.id, e); }
+  const out = new Map();
+  for (const id of ids) {
+    const found = [], seen = new Set([id]);
+    const walk = (rel, depth) => {
+      for (const m of rel.members || []) {
+        if (m.type === 'way' && ways.has(m.ref)) found.push(ways.get(m.ref));
+        else if (m.type === 'relation' && rels.has(m.ref) && depth < 3 && !seen.has(m.ref)) { seen.add(m.ref); walk(rels.get(m.ref), depth + 1); }
+      }
+    };
+    if (rels.has(id)) walk(rels.get(id), 0);
+    const { fc, km } = linesOf(found);
+    prefetched.set(id, fc);
+    out.set(id, km);
+  }
+  return out;
+}
+
+/**
+ * Grobe Vorschau einer Route für den Kartenausschnitt. Reihenfolge: schon ganz geladene Strecke,
+ * vorab geladene Vorschau der Liste, sonst eine eigene schnelle Abfrage nur für diese Route.
  */
 export async function previewRoute(id, bbox, signal) {
   const done = trackDone.get(id);
@@ -89,22 +142,12 @@ export async function previewRoute(id, bbox, signal) {
     coordinates.push([done.lon[done.n - 1], done.lat[done.n - 1]]);
     return { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates } }] };
   }
+  if (prefetched.has(id) && prefetched.get(id).features.length) return prefetched.get(id);
   const b = bbox.map((v) => v.toFixed(3)).join(',');
   const key = id + '|' + b;
   if (!prevCache.has(key)) {
-    const q = `[out:json][timeout:12];rel(${id})->.t;rel(r.t)->.c;rel(r.c)->.c2;(.t;.c;.c2;)->.a;way(r.a)(${b});out skel geom(${b}) qt;`;
-    const job = overpass(q, signal, 15000, 2).then((json) => {
-      const lines = [];
-      for (const e of json.elements || []) {
-        let cur = [];
-        for (const g of e.geometry || []) {
-          if (g && Number.isFinite(g.lat)) cur.push([g.lon, g.lat]);
-          else { if (cur.length > 1) lines.push(cur); cur = []; }
-        }
-        if (cur.length > 1) lines.push(cur);
-      }
-      return { type: 'FeatureCollection', features: lines.length ? [{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: lines } }] : [] };
-    });
+    const q = `[out:json][timeout:15];rel(${id})->.t;rel(r.t)->.c;rel(r.c)->.c2;(.t;.c;.c2;)->.a;way(r.a)(${b});out geom qt;`;
+    const job = overpass(q, signal, 20000).then((json) => linesOf((json.elements || []).filter((e) => e.type === 'way')).fc);
     prevCache.set(key, job);
     job.catch(() => prevCache.delete(key));
   }
