@@ -12,7 +12,7 @@ import { createProfileChart } from './elevation.js';
 import { generateRoundTrips, generateDetours } from './roundtrip.js';
 import { POI_CATS, POI_GROUPS, fetchPois, PoiError } from './pois.js';
 import { listOffline, planDownload, runDownload, removeDownload } from './offline.js';
-import { searchRoutes, searchRoutesQuick, loadRouteTrack, sliceTrack, previewRoute, cachedPreview, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
+import { searchRoutes, searchRoutesQuick, loadRouteTrack, sliceTrack, previewRoute, cachedPreview, hasPreview, fetchRouteLengths, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
 import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
@@ -61,6 +61,8 @@ const state = {
   routeTour: null, // Tour auf einer eingetragenen Route: { id, name, from, to, approach, back }
   rtOpts: { approach: true, back: false },
   rtRoundOnly: false,
+  rtKind: '',   // Art in der Routenliste: bicycle, mtb, hiking; leer = passend zum Profil
+  rtMaxKm: 0,   // Länge höchstens (0 = beliebig)
   radar: false,
   waypoints: [emptyWp(), emptyWp()],
   nogos: [],
@@ -95,6 +97,8 @@ function load() {
     if (s.routeTour && s.routeTour.id) state.routeTour = s.routeTour;
     if (s.rtOpts) state.rtOpts = { ...state.rtOpts, ...s.rtOpts };
     state.rtRoundOnly = !!s.rtRoundOnly;
+    if (['bicycle', 'mtb', 'hiking'].includes(s.rtKind)) state.rtKind = s.rtKind;
+    if (s.rtMaxKm > 0) state.rtMaxKm = s.rtMaxKm;
     state.radar = !!s.radar;
     if (Array.isArray(s.waypoints) && s.waypoints.length >= 2) state.waypoints = s.waypoints.map((w) => ({ ...emptyWp(), ...w, id: uid() }));
     if (Array.isArray(s.nogos)) state.nogos = s.nogos.map((n) => ({ ...n, id: uid() }));
@@ -177,7 +181,7 @@ function renderRadarInfo() {
 let map, chart, hoverMarker = null, popup = null;
 let markers = [], nogoMarkers = [];
 const EMPTY = { type: 'FeatureCollection', features: [] };
-const overlay = { route: EMPTY, cands: EMPTY, nogo: EMPTY, wind: EMPTY, sel: EMPTY, rtrack: EMPTY, rsec: EMPTY, rtprev: EMPTY };
+const overlay = { route: EMPTY, cands: EMPTY, nogo: EMPTY, wind: EMPTY, sel: EMPTY, rtrack: EMPTY, rsec: EMPTY, rtprev: EMPTY, rtall: EMPTY };
 
 // Weißer Winkel, der in Fahrtrichtung zeigt (wird entlang der Route wiederholt)
 function chevronImage() {
@@ -209,7 +213,7 @@ function setLayer(key) {
 // nach jedem Stilwechsel neu angelegt.
 function addOverlays() {
   if (map.getSource('route')) return;
-  for (const k of ['nogo', 'cands', 'rtprev', 'rtrack', 'rsec', 'wind', 'route', 'sel']) map.addSource(k, { type: 'geojson', data: overlay[k] });
+  for (const k of ['nogo', 'cands', 'rtall', 'rtprev', 'rtrack', 'rsec', 'wind', 'route', 'sel']) map.addSource(k, { type: 'geojson', data: overlay[k] });
   if (!map.hasImage('chevron')) map.addImage('chevron', chevronImage(), { pixelRatio: 2 });
   const round = { 'line-cap': 'round', 'line-join': 'round' };
   map.addLayer({ id: 'nogo-fill', type: 'fill', source: 'nogo', paint: { 'fill-color': '#b3261e', 'fill-opacity': 0.14 } });
@@ -219,8 +223,12 @@ function addOverlays() {
   map.addLayer({ id: 'cand-hit', type: 'line', source: 'cands', paint: { 'line-color': '#000', 'line-width': 24, 'line-opacity': 0.01 } });
   // eingetragene Route im Reiter „Routen“ (blau) und der gewählte Abschnitt
   // Vorschau beim Überfahren der Liste: grob, gestrichelt
-  map.addLayer({ id: 'rtprev-casing', type: 'line', source: 'rtprev', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 8, 'line-opacity': 0.9 } });
-  map.addLayer({ id: 'rtprev-line', type: 'line', source: 'rtprev', layout: round, paint: { 'line-color': '#2a78d6', 'line-width': 4, 'line-dasharray': [2, 1.2] } });
+  // alle Routen der Liste; die hervorgehobene (Maus, gerade geöffnet) liegt darüber
+  map.addLayer({ id: 'rtall-casing', type: 'line', source: 'rtall', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 6, 'line-opacity': 0.85 } });
+  map.addLayer({ id: 'rtall-line', type: 'line', source: 'rtall', layout: round, paint: { 'line-color': '#2a78d6', 'line-width': 3, 'line-opacity': 0.85 } });
+  map.addLayer({ id: 'rtall-hit', type: 'line', source: 'rtall', paint: { 'line-color': '#000', 'line-width': 18, 'line-opacity': 0.01 } });
+  map.addLayer({ id: 'rtprev-casing', type: 'line', source: 'rtprev', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 9, 'line-opacity': 0.95 } });
+  map.addLayer({ id: 'rtprev-line', type: 'line', source: 'rtprev', layout: round, paint: { 'line-color': '#1f5fae', 'line-width': 5 } });
   map.addLayer({ id: 'rt-casing', type: 'line', source: 'rtrack', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9 } });
   map.addLayer({ id: 'rt-line', type: 'line', source: 'rtrack', layout: round, paint: { 'line-color': '#2a78d6', 'line-width': 3.5, 'line-opacity': 0.75 } });
   map.addLayer({ id: 'rsec-line', type: 'line', source: 'rsec', layout: round, paint: { 'line-color': '#1f5fae', 'line-width': 7 } });
@@ -307,6 +315,7 @@ function initMap() {
     toggleLayerMenu(false);
     const box = [[ev.point.x - 9, ev.point.y - 9], [ev.point.x + 9, ev.point.y + 9]];
     if (state.tab === 'routen') {
+      if (!rtSel && !rtLoading) return rtPick(box, ev.lngLat.lat, ev.lngLat.lng);
       const onTrack = rtSel && map.getLayer('rt-hit') && map.queryRenderedFeatures(box, { layers: ['rt-hit'] }).length;
       return onTrack ? rtMenu(ev.lngLat.lat, ev.lngLat.lng) : rtStartMenu(ev.lngLat.lat, ev.lngLat.lng);
     }
@@ -329,6 +338,16 @@ function initMap() {
     chart.setCursor(route.cum[i]);
   });
   map.on('mouseleave', 'route-hit', () => { map.getCanvas().style.cursor = ''; setHover(null); chart.setCursor(null); });
+  // Routen auf der Karte: unter der Maus hervorheben
+  let rtHover = null;
+  map.on('mousemove', 'rtall-hit', (ev) => {
+    const id = ev.features[0].properties.id;
+    map.getCanvas().style.cursor = 'pointer';
+    if (id === rtHover) return;
+    rtHover = id;
+    setOverlay('rtprev', cachedPreview(id) || EMPTY);
+  });
+  map.on('mouseleave', 'rtall-hit', () => { map.getCanvas().style.cursor = ''; rtHover = null; if (!rtLoading) setOverlay('rtprev', EMPTY); });
   map.on('mouseenter', 'cand-hit', () => { map.getCanvas().style.cursor = 'pointer'; });
   map.on('mouseleave', 'cand-hit', () => { map.getCanvas().style.cursor = ''; });
 }
@@ -1163,6 +1182,20 @@ let rtList = [], rtSel = null, rtSec = null, rtCtrl = null, rtMarkers = [], rtLo
 let rtLoading = null;   // Route, deren Strecke gerade geladen wird (Ansicht ist schon offen)
 let rtMode = 'whole';   // whole: ganze Route, part: Abschnitt, loop: Runde mit Wunschlänge
 let rtSearchCtrl = null, rtSearched = false;
+let rtBbox = null, rtLenReady = false, rtPreBusy = false;
+const RT_KINDS = [['bicycle', 'Rad'], ['mtb', 'MTB'], ['hiking', 'Wandern']];
+const RT_LEN = [5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200, 300, 500, 0]; // Stufen des Schiebers, 0 = beliebig
+const rtKindOf = (r) => (r.kind === 'foot' ? 'hiking' : r.kind);
+const rtKind = () => state.rtKind || (state.profile === 'wandern' ? 'hiking' : 'bicycle');
+// Länge einer Route: eingetragen, sonst aus den Wegstücken summiert
+const rtKm = (r) => r.km || r.lenKm || 0;
+function rtPasses(r) {
+  if (state.rtRoundOnly && !r.round) return false;
+  const max = state.rtMaxKm, km = rtKm(r);
+  // unbekannte Länge: solange die Längen noch laden, zeigen; danach nur ohne Längenfilter
+  return !max || (km ? km <= max : !rtLenReady);
+}
+const rtVisible = () => rtList.filter((r) => rtKindOf(r) === rtKind() && rtPasses(r));
 
 const hasStart = () => !!state.waypoints[0] && state.waypoints[0].lat != null;
 const rtWhole = () => !!rtSel && Math.abs(rtSec.to - rtSec.from) > rtSel.track.dist - 50;
@@ -1181,7 +1214,11 @@ const kmText = (m) => fmt(m / 1000, m < 100000 ? 1 : 0);
 function initRoutes() {
   $('btnRtSearch').addEventListener('click', runRtSearch);
   $('rtRoundOnly').checked = state.rtRoundOnly;
-  $('rtRoundOnly').addEventListener('change', () => { state.rtRoundOnly = $('rtRoundOnly').checked; save(); renderRtList(); });
+  $('rtRoundOnly').addEventListener('change', () => { state.rtRoundOnly = $('rtRoundOnly').checked; save(); renderRtList(); ensurePreviews(); });
+  const len = $('rtLen');
+  len.value = Math.max(0, RT_LEN.indexOf(state.rtMaxKm));
+  len.addEventListener('input', () => { state.rtMaxKm = RT_LEN[+len.value] || 0; renderRtList(); });
+  len.addEventListener('change', () => { save(); ensurePreviews(); });
   $('btnRtBack').addEventListener('click', () => {
     if (rtCtrl) rtCtrl.abort();
     rtCtrl = null; rtSel = null; rtLoading = null; rtLoopCands = [];
@@ -1235,6 +1272,7 @@ async function runRtSearch() {
   rtSearched = true;
   rtList = [];
   rtOpen = {};
+  rtBbox = bbox; rtLenReady = false;
   renderRtList();
   rtStatus('Routen werden gesucht …');
   $('btnRtSearch').disabled = true;
@@ -1259,67 +1297,113 @@ async function runRtSearch() {
     // Die schnelle Liste reicht zum Weitermachen (kommt sie erst noch, ersetzt sie die Meldung); nur ohne sie ist es ein Fehler
     rtStatus(rtList.length ? '' : (e.message || 'Die Routen konnten nicht geladen werden.'));
   } finally { if (ctrl === rtSearchCtrl) $('btnRtSearch').disabled = false; }
-  if (ctrl === rtSearchCtrl && full && rtList.length) prefetchList(bbox, ctrl);
+  if (ctrl === rtSearchCtrl && full && rtList.length) ensurePreviews();
 }
 
-// Vorschau der wichtigsten Routen im Hintergrund laden (in Portionen, die wichtigsten zuerst);
-// am Ende einmal nach Länge im Ausschnitt sortieren
-async function prefetchList(bbox, ctrl) {
-  const ids = rtList.slice(0, 120).map((r) => r.id), km = new Map();
-  for (let i = 0; i < ids.length; i += 40) {
-    try { for (const [id, v] of await prefetchPreviews(ids.slice(i, i + 40), bbox, ctrl.signal)) km.set(id, v); } catch (e) { break; /* Vorschau lädt dann beim Überfahren einzeln */ }
-    if (ctrl !== rtSearchCtrl) return;
+// Linien für die Karte im Hintergrund laden: zuerst die Routen, die gerade in der Liste stehen (in Portionen, die
+// wichtigsten zuerst), dazwischen einmal die Längen für den Schieber. Wechselt die Auswahl, lädt der Rest nach.
+async function ensurePreviews() {
+  if (rtPreBusy || !rtBbox || !rtSearchCtrl) return;
+  const ctrl = rtSearchCtrl, bbox = rtBbox;
+  rtPreBusy = true;
+  let sorted = false;
+  try {
+    for (let round = 0; round < 6; round++) {
+      const ids = rtVisible().filter((r) => !hasPreview(r.id)).slice(0, 40).map((r) => r.id);
+      if (!ids.length && rtLenReady) break;
+      if (ids.length) {
+        const km = await prefetchPreviews(ids, bbox, ctrl.signal);
+        if (ctrl !== rtSearchCtrl) return;
+        for (const r of rtList) if (km.has(r.id)) r.visKm = km.get(r.id);
+        sorted = true;
+        renderRtAll();
+      }
+      if (!rtLenReady) {
+        const need = rtList.filter((r) => !r.km).slice(0, 150).map((r) => r.id);
+        try { const len = await fetchRouteLengths(need, ctrl.signal); for (const r of rtList) if (len.has(r.id)) r.lenKm = len.get(r.id); } catch (e) { if (ctrl !== rtSearchCtrl) return; /* dann filtert der Schieber nur eingetragene Längen */ }
+        if (ctrl !== rtSearchCtrl) return;
+        rtLenReady = true;
+        if (!rtSel && !rtLoading) renderRtList();
+      }
+    }
+  } catch (e) { /* Linien laden dann beim Überfahren einzeln */ } finally {
+    rtPreBusy = false;
+    if (sorted && ctrl === rtSearchCtrl) { rtList.sort(byImportance); if (!rtSel && !rtLoading) renderRtList(); }
   }
-  if (!km.size) return;
-  for (const r of rtList) if (km.has(r.id)) r.visKm = km.get(r.id);
-  rtList.sort(byImportance);
-  if (!rtSel && !rtLoading) renderRtList();
 }
 
-let rtOpen = {}; // vom Nutzer auf- oder zugeklappte Gruppen bleiben so, auch wenn die Liste neu sortiert wird
-const RT_GROUPS = [['bicycle', 'Radwege'], ['mtb', 'MTB-Strecken'], ['hiking', 'Wanderwege']];
-const RT_LEVELS = ['International', 'National', 'Regional', 'Lokal', 'Ohne Einstufung'];
+// Alle Routen der Liste als Linien auf der Karte (nur in der Listenansicht)
+function renderRtAll() {
+  if (!map || !map.getSource('rtall')) return;
+  const show = state.tab === 'routen' && !rtSel && !rtLoading;
+  const features = [];
+  if (show) {
+    const list = rtVisible(), ids = new Set(list.map((r) => r.id));
+    for (const r of list) {
+      if (r.parents.some((p) => ids.has(p))) continue; // Teilabschnitte stecken schon in der übergeordneten Route
+      const fc = cachedPreview(r.id);
+      if (fc) features.push({ type: 'Feature', properties: { id: r.id }, geometry: fc.features[0].geometry });
+    }
+  }
+  setOverlay('rtall', { type: 'FeatureCollection', features });
+}
 
-// Liste gegliedert nach Art (Radwege, MTB, Wanderwege) und Bedeutung; Teilabschnitte stehen eingeklappt unter ihrer Route.
+// Tipp auf die Karte in der Listenansicht: Route unter dem Finger öffnen; bei mehreren zur Wahl stellen
+function rtPick(box, lat, lon) {
+  if (popup) return closeMenu();
+  const ids = [...new Set(map.queryRenderedFeatures(box, { layers: ['rtall-hit'] }).map((f) => f.properties.id))];
+  const hits = ids.map((id) => rtList.find((r) => r.id === id)).filter(Boolean);
+  if (!hits.length) return rtStartMenu(lat, lon);
+  if (hits.length === 1) return openRoute(hits[0]);
+  openMenu(lat, lon, h('div', { class: 'map-menu' }, h('strong', { text: `${hits.length} Routen an dieser Stelle` }),
+    ...hits.slice(0, 8).map((r) => h('button', { type: 'button', text: r.name, onclick: () => { closeMenu(); openRoute(r); } }))));
+}
+
+const RT_LEVELS = ['International', 'National', 'Regional', 'Lokal', 'Ohne Einstufung'];
+let rtOpen = {};
+
 function renderRtList() {
   const host = $('rtList');
   host.replaceChildren();
   $('rtFilter').hidden = !rtList.length;
-  const list = state.rtRoundOnly ? rtList.filter((r) => r.round) : rtList;
-  if (rtList.length && !list.length) host.append(h('p', { class: 'hint', text: 'Hier ist kein Rundweg eingetragen. Schalte den Filter aus oder verschiebe die Karte.' }));
+  // Art: Rad, MTB, Wandern (mit Zahl der Routen, die zu Länge und Rundweg-Filter passen)
+  const kind = rtKind();
+  $('rtKindSeg').replaceChildren(...RT_KINDS.map(([k, label]) => h('button', { type: 'button', role: 'radio', 'aria-checked': String(kind === k),
+    onclick: () => { state.rtKind = k; save(); renderRtList(); ensurePreviews(); } },
+  label, h('span', { class: 'rt-count', text: String(rtList.filter((r) => rtKindOf(r) === k && rtPasses(r)).length) }))));
+  $('rtLen').value = Math.max(0, RT_LEN.indexOf(state.rtMaxKm));
+  $('rtLenOut').textContent = state.rtMaxKm ? `bis ${state.rtMaxKm} km` : 'beliebig';
+  const list = rtVisible();
+  if (rtList.length && !list.length) {
+    const other = RT_KINDS.find(([k]) => rtList.some((r) => rtKindOf(r) === k && rtPasses(r)));
+    host.append(h('p', { class: 'hint', text: state.rtMaxKm || state.rtRoundOnly ? 'Keine Route passt zu Länge und Rundweg-Filter. Lockere die Auswahl oder verschiebe die Karte.'
+      : `Hier ist dazu nichts eingetragen.${other ? ` Unter „${other[1]}“ gibt es Routen.` : ''}` }));
+  }
   const ids = new Set(list.map((r) => r.id)), byId = new Map(list.map((r) => [r.id, r]));
-  const kindOf = (r) => (r.kind === 'foot' ? 'hiking' : r.kind);
-  const main = state.profile === 'wandern' ? 'hiking' : 'bicycle';
   const item = (r, small) => h('li', {}, h('button', { type: 'button', class: 'cand', onclick: () => openRoute(r),
     onmouseenter: () => schedulePreview(r), onmouseleave: () => cancelPreview(), onfocus: () => schedulePreview(r), onblur: () => cancelPreview() },
   h('span', { class: 'cand-top' }, h('span', { class: 'cand-name', text: r.name }), r.round ? h('span', { class: 'rt-round', text: 'Rundweg' }) : null),
   small ? null : h('span', { class: 'cand-nums' }, h('span', { text: routeLabel(r) + (r.visKm >= 0.5 ? `, ${fmt(r.visKm)} km im Ausschnitt` : '') }))));
   const fold = (key, def, el) => { el.open = key in rtOpen ? rtOpen[key] : def; el.addEventListener('toggle', () => { rtOpen[key] = el.open; }); return el; };
-  for (const [kind, title] of RT_GROUPS) {
-    const items = list.filter((r) => kindOf(r) === kind);
-    if (!items.length) continue;
-    const top = items.filter((r) => !r.parents.some((p) => ids.has(p)));
-    const group = fold(kind, kind === main || items.length === list.length, h('details', { class: 'rt-group' },
-      h('summary', {}, h('span', { text: title }), h('span', { class: 'rt-count', text: String(items.length) }))));
-    RT_LEVELS.forEach((lv, rank) => {
-      const lvItems = top.filter((r) => r.rank === rank);
-      if (!lvItems.length) return;
-      const ul = h('ul', { class: 'cand-list' });
-      for (const r of lvItems) {
-        ul.append(item(r));
-        const kids = r.children.map((c) => byId.get(c)).filter(Boolean);
-        if (kids.length) {
-          const sub = fold('sub' + r.id, false, h('details', { class: 'rt-sub' }, h('summary', { text: `${kids.length} Teilabschnitt${kids.length > 1 ? 'e' : ''}` })));
-          sub.append(h('ul', { class: 'cand-list' }, ...kids.map((k) => item(k, true))));
-          ul.append(h('li', {}, sub));
-        }
+  const top = list.filter((r) => !r.parents.some((p) => ids.has(p)));
+  RT_LEVELS.forEach((lv, rank) => {
+    const lvItems = top.filter((r) => r.rank === rank);
+    if (!lvItems.length) return;
+    const ul = h('ul', { class: 'cand-list' });
+    for (const r of lvItems) {
+      ul.append(item(r));
+      const kids = r.children.map((c) => byId.get(c)).filter(Boolean);
+      if (kids.length) {
+        const sub = fold('sub' + r.id, false, h('details', { class: 'rt-sub' }, h('summary', { text: `${kids.length} Teilabschnitt${kids.length > 1 ? 'e' : ''}` })));
+        sub.append(h('ul', { class: 'cand-list' }, ...kids.map((k) => item(k, true))));
+        ul.append(h('li', {}, sub));
       }
-      // lokale Routen sind oft sehr viele: eingeklappt
-      if (rank >= 3 && lvItems.length > 4) group.append(fold(kind + rank, false, h('details', { class: 'rt-level-fold' }, h('summary', { text: `${lv} (${lvItems.length})` }), ul)));
-      else group.append(h('div', { class: 'rt-level', text: lv }), ul);
-    });
-    host.append(group);
-  }
+    }
+    // lokale Routen sind oft sehr viele: eingeklappt, solange es auch wichtigere gibt
+    if (rank >= 3 && lvItems.length > 6 && lvItems.length < top.length) host.append(fold(kind + rank, false, h('details', { class: 'rt-level-fold' }, h('summary', { text: `${lv} (${lvItems.length})` }), ul)));
+    else host.append(h('div', { class: 'rt-level', text: lv }), ul);
+  });
+  renderRtAll();
 }
 
 // Vorschau beim Überfahren mit der Maus: nach kurzer Pause grob die Strecke im Kartenausschnitt zeigen
@@ -1344,6 +1428,7 @@ function cancelPreview() {
   prevCtrl = null; prevFor = null;
   setOverlay('rtprev', EMPTY);
 }
+
 
 // Route öffnen: Die Ansicht erscheint sofort, die Strecke folgt. "preset" stellt einen gespeicherten Abschnitt wieder her.
 async function openRoute(item, preset) {
@@ -1438,6 +1523,7 @@ function renderRtSel() {
 function renderRtMap() {
   rtMarkers.forEach((m) => m.remove());
   rtMarkers = [];
+  renderRtAll();
   const show = state.tab === 'routen' && rtSel;
   setOverlay('rtrack', show ? { type: 'FeatureCollection', features: [lineFeature(rtSel.track)] } : EMPTY);
   if (!show) { setOverlay('rsec', EMPTY); return; }

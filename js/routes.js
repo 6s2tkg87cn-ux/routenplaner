@@ -10,7 +10,8 @@ const KIND_LABEL = { bicycle: 'Radroute', mtb: 'MTB-Route', hiking: 'Wanderweg',
 
 export function routeLabel(r) {
   const lvl = LEVEL[r.rank];
-  return (lvl ? lvl + 'e ' : '') + (KIND_LABEL[r.kind] || 'Route') + (r.km ? `, ${r.km.toLocaleString('de-DE', { maximumFractionDigits: 0 })} km` : '');
+  const km = r.km ? `, ${r.km.toLocaleString('de-DE', { maximumFractionDigits: 0 })} km` : r.lenKm ? `, etwa ${r.lenKm.toLocaleString('de-DE', { maximumFractionDigits: 0 })} km` : '';
+  return (lvl ? lvl + 'e ' : '') + (KIND_LABEL[r.kind] || 'Route') + km;
 }
 
 // Wichtigkeit: erst die Einstufung (international vor lokal), dann die Länge im Kartenausschnitt (sobald bekannt),
@@ -198,6 +199,21 @@ export async function prefetchPreviews(ids, bbox, signal) {
     prefetched.set(id, fc);
     out.set(id, km);
   }
+  return out;
+}
+
+/** Liegt für diese Route schon eine Vorschau vor (auch eine leere)? */
+export const hasPreview = (id) => prefetched.has(id);
+
+/**
+ * Längen der Routen in km, vom Server aus den Wegstücken summiert. Grobe Angabe: in beiden Richtungen
+ * getrennt eingetragene Strecken zählen doppelt, Routen nur aus Unterrouten liefern nichts.
+ */
+export async function fetchRouteLengths(ids, signal) {
+  if (!ids.length) return new Map();
+  const json = await overpass(`[out:json][timeout:25];rel(id:${ids.join(',')});convert rel ::id=id(),len=length();out;`, signal, 30000, 3);
+  const out = new Map();
+  for (const e of json.elements || []) { const v = parseFloat(e.tags && e.tags.len); if (v > 0) out.set(e.id, v / 1000); }
   return out;
 }
 

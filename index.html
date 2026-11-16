@@ -98,12 +98,20 @@
 
       <section class="block" data-tab="routen" id="rtSearch">
         <h2>Routen</h2>
-        <p class="hint rt-lead">Eingetragene Rad-, MTB- und Wanderrouten im sichtbaren Kartenausschnitt.<span class="hover-only"> Fahre mit der Maus über einen Eintrag, um ihn auf der Karte zu sehen.</span></p>
+        <p class="hint rt-lead">Eingetragene Rad-, MTB- und Wanderrouten im sichtbaren Kartenausschnitt. Wähle eine in der Liste oder auf der Karte.</p>
         <button id="btnRtSearch" class="primary-btn wide" type="button">Routen im Kartenausschnitt suchen</button>
         <p class="hint" id="rtStatus" hidden></p>
-        <div class="row-toggle rt-filter" id="rtFilter" hidden>
-          <label for="rtRoundOnly"><span class="opt-label">Nur Rundwege</span><span class="opt-note">Routen, die zum Ausgangspunkt zurückführen, soweit so eingetragen.</span></label>
-          <input type="checkbox" id="rtRoundOnly" class="switch">
+        <div id="rtFilter" class="rt-filter" hidden>
+          <div class="seg seg-small" id="rtKindSeg" role="radiogroup" aria-label="Art der Route"></div>
+          <div class="rt-len">
+            <label for="rtLen">Länge</label>
+            <input type="range" id="rtLen" min="0" max="13" step="1">
+            <output id="rtLenOut" for="rtLen"></output>
+          </div>
+          <div class="row-toggle">
+            <label for="rtRoundOnly"><span class="opt-label">Nur Rundwege</span><span class="opt-note">Routen, die zum Ausgangspunkt zurückführen, soweit so eingetragen.</span></label>
+            <input type="checkbox" id="rtRoundOnly" class="switch">
+          </div>
         </div>
         <div id="rtList" class="rt-groups"></div>
       </section>

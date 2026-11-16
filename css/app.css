@@ -101,16 +101,14 @@ body.route-tour #wpList, body.route-tour #mapHint, body.route-tour #routeExtras,
 #rtBody .mode-body { margin-top: 0; }
 #rtBody > .link-btn, #rtPart > .link-btn { justify-self: start; }
 #rtLoopBox .hint { margin: 0; }
-@media not (hover: hover) { .hover-only { display: none; } }
 #rtSel h3 { margin-top: 18px; }
-.rt-filter { margin: 14px 0 4px; }
+.rt-filter { display: grid; gap: 12px; margin: 14px 0 4px; }
+.rt-len { display: grid; grid-template-columns: auto 1fr 5.2em; align-items: center; gap: 12px; }
+.rt-len label { font-weight: 500; }
+.rt-len output { text-align: right; font: 500 14px var(--font-num); white-space: nowrap; }
+.rt-len input { width: 100%; accent-color: var(--accent); height: 28px; margin: 0; }
 .rt-groups { display: grid; gap: 4px; margin-top: 10px; }
-.rt-group { border-top: 1px solid var(--line); padding: 10px 0 6px; }
-.rt-group > summary { list-style: none; cursor: pointer; display: flex; align-items: baseline; justify-content: space-between; font: 600 16px/1.3 var(--font-num); }
-.rt-group > summary::-webkit-details-marker { display: none; }
-.rt-group > summary::after { content: ''; width: 7px; height: 7px; margin-left: 8px; border-right: 1.8px solid currentColor; border-bottom: 1.8px solid currentColor; transform: rotate(-45deg); align-self: center; }
-.rt-group[open] > summary::after { transform: rotate(45deg); }
-.rt-count { margin-left: auto; font: 500 13px var(--font); color: var(--muted); }
+.rt-count { margin-left: 6px; font: 500 12px var(--font-num); opacity: 0.65; }
 .rt-level { font-size: 13px; font-weight: 500; color: var(--muted); margin: 10px 0 5px; }
 .rt-level-fold > summary { list-style: none; cursor: pointer; font-size: 13px; font-weight: 500; color: var(--muted); margin: 10px 0 5px; }
 .rt-level-fold > summary::-webkit-details-marker { display: none; }
@@ -502,3 +500,5 @@ body.navigating .me-dot::after { content: ''; position: absolute; left: 50%; top
   * { transition: none !important; }
   .busy::after { animation-duration: 2.5s; }
 }
+
+#rtSearch .rt-lead { margin-bottom: 12px; }
