@@ -98,10 +98,14 @@
 
       <section class="block" data-tab="routen" id="rtSearch">
         <h2>Routen</h2>
-        <p class="hint rt-lead">Eingetragene Rad- und Wanderrouten im sichtbaren Kartenausschnitt, passend zum gewählten Typ.</p>
+        <p class="hint rt-lead">Eingetragene Rad-, MTB- und Wanderrouten im sichtbaren Kartenausschnitt. Fahre mit der Maus über einen Eintrag, um ihn auf der Karte zu sehen.</p>
         <button id="btnRtSearch" class="primary-btn wide" type="button">Routen im Kartenausschnitt suchen</button>
         <p class="hint" id="rtStatus" hidden></p>
-        <ul id="rtList" class="cand-list rt-list"></ul>
+        <div class="row-toggle rt-filter" id="rtFilter" hidden>
+          <label for="rtRoundOnly"><span class="opt-label">Nur Rundwege</span><span class="opt-note">Routen, die zum Ausgangspunkt zurückführen, soweit so eingetragen.</span></label>
+          <input type="checkbox" id="rtRoundOnly" class="switch">
+        </div>
+        <div id="rtList" class="rt-groups"></div>
       </section>
 
       <section class="block" data-tab="routen" id="rtSel" hidden>
@@ -222,6 +226,7 @@
         Karten und Daten: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>-Mitwirkende.
         Suche: <a href="https://photon.komoot.io" target="_blank" rel="noopener">Photon</a>.
         Wetter: <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a>.
+        Höhen für Routen: <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noopener">Terrain Tiles</a> (Mapzen, AWS; u. a. SRTM, EU-DEM).
       </footer>
     </div>
   </aside>

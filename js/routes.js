@@ -4,7 +4,6 @@ import { fetchRoute, mergeGeo, parseRoute, pointAt, projectOnRoute, haversine, R
 import { compassName } from './roundtrip.js';
 
 // Welche Routenarten zu welchem Typ passen
-const KINDS = { rennrad: 'bicycle', alltag: 'bicycle', gravel: 'bicycle|mtb', wandern: 'hiking|foot' };
 const RANK = { icn: 0, iwn: 0, ncn: 1, nwn: 1, rcn: 2, rwn: 2, lcn: 3, lwn: 3 };
 const LEVEL = { 0: 'International', 1: 'National', 2: 'Regional', 3: 'Lokal', 4: '' };
 const KIND_LABEL = { bicycle: 'Radroute', mtb: 'MTB-Route', hiking: 'Wanderweg', foot: 'Wanderweg' };
@@ -14,9 +13,9 @@ export function routeLabel(r) {
   return (lvl ? lvl + 'e ' : '') + (KIND_LABEL[r.kind] || 'Route') + (r.km ? `, ${r.km.toLocaleString('de-DE', { maximumFractionDigits: 0 })} km` : '');
 }
 
-/** Routen im Kartenausschnitt [Süd, West, Nord, Ost], passend zum Typ. Übergeordnete Routen werden mitgeliefert. */
+/** Routen im Kartenausschnitt [Süd, West, Nord, Ost]: Rad-, MTB- und Wanderrouten. Übergeordnete Routen werden mitgeliefert. */
 export async function searchRoutes(bbox, profile, signal) {
-  const kinds = KINDS[profile] || 'bicycle';
+  const kinds = 'bicycle|mtb|hiking|foot';
   const b = bbox.map((v) => v.toFixed(4)).join(',');
   const q = `[out:json][timeout:25];rel[type=route][route~"^(${kinds})$"](${b})->.r;.r out tags;rel(br.r)[type~"^(route|superroute)$"]->.p;.p out body;`;
   const json = await overpass(q, signal, 40000);
@@ -28,19 +27,21 @@ export async function searchRoutes(bbox, profile, signal) {
     const item = prev || {
       id: e.id, name: t.name || t['name:de'] || t.ref || '', ref: t.ref || '', kind: t.route || '', rank: RANK[t.network] ?? 4,
       km: parseFloat(String(t.distance || '').replace(',', '.')) || 0, website: t.website || t.url || '', parents: [], children: [],
+      // Rundweg: ausdrücklich so eingetragen, oder der Name sagt es
+      round: t.roundtrip === 'yes' || (t.roundtrip !== 'no' && /rund(weg|wanderweg|tour|kurs|e\b)|runde\b|\bloop\b/i.test(t.name || '')),
     };
     if (e.members) for (const m of e.members) if (m.type === 'relation') item.children.push(m.ref);
     map.set(e.id, item);
   }
   for (const it of map.values()) for (const c of it.children) { const ch = map.get(c); if (ch && !ch.parents.includes(it.id)) ch.parents.push(it.id); }
-  return [...map.values()].filter((r) => r.name).sort((a, c) => a.rank - c.rank || a.name.localeCompare(c.name, 'de')).slice(0, 80)
+  return [...map.values()].filter((r) => r.name).sort((a, c) => a.rank - c.rank || a.name.localeCompare(c.name, 'de')).slice(0, 200)
     .map((r) => ({ ...r, parentNames: r.parents.map((id) => map.get(id)).filter((x) => x && x.name).map((x) => x.name) }));
 }
 
 // ---------------------------------------------------------------- Strecke aus den Wegstücken
 
 const SKIP_ROLES = /^(alternative|excursion|approach|connection|link|platform|stop|guidepost)$/;
-const trackCache = new Map();
+const trackCache = new Map(), trackDone = new Map();
 
 /** Lädt eine Route (auch mit Unterrouten) und setzt die Wegstücke zu einer durchgehenden Strecke zusammen. */
 export async function loadRouteTrack(id, signal) {
@@ -69,8 +70,45 @@ export async function loadRouteTrack(id, signal) {
     return { ...chainWays(list), id, name: t.name || t['name:de'] || t.ref || 'Route', website: t.website || t.url || '' };
   })();
   trackCache.set(id, job);
-  job.catch(() => trackCache.delete(id));
+  job.then((t) => trackDone.set(id, t), () => trackCache.delete(id));
   return job;
+}
+
+// ---------------------------------------------------------------- Schnelle Vorschau
+
+const prevCache = new Map();
+/**
+ * Grobe Vorschau einer Route für den Kartenausschnitt: nur die Wegstücke im Ausschnitt, ohne Angaben dazu.
+ * Ist die Route schon ganz geladen, wird die fertige Strecke genommen.
+ */
+export async function previewRoute(id, bbox, signal) {
+  const done = trackDone.get(id);
+  if (done) {
+    const step = Math.max(1, Math.floor(done.n / 3000)), coordinates = [];
+    for (let i = 0; i < done.n; i += step) coordinates.push([done.lon[i], done.lat[i]]);
+    coordinates.push([done.lon[done.n - 1], done.lat[done.n - 1]]);
+    return { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates } }] };
+  }
+  const b = bbox.map((v) => v.toFixed(3)).join(',');
+  const key = id + '|' + b;
+  if (!prevCache.has(key)) {
+    const q = `[out:json][timeout:12];rel(${id})->.t;rel(r.t)->.c;rel(r.c)->.c2;(.t;.c;.c2;)->.a;way(r.a)(${b});out skel geom(${b}) qt;`;
+    const job = overpass(q, signal, 15000, 2).then((json) => {
+      const lines = [];
+      for (const e of json.elements || []) {
+        let cur = [];
+        for (const g of e.geometry || []) {
+          if (g && Number.isFinite(g.lat)) cur.push([g.lon, g.lat]);
+          else { if (cur.length > 1) lines.push(cur); cur = []; }
+        }
+        if (cur.length > 1) lines.push(cur);
+      }
+      return { type: 'FeatureCollection', features: lines.length ? [{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: lines } }] : [] };
+    });
+    prevCache.set(key, job);
+    job.catch(() => prevCache.delete(key));
+  }
+  return prevCache.get(key);
 }
 
 const hav = (a, b) => haversine(a.lat, a.lon, b.lat, b.lon);
@@ -165,44 +203,98 @@ export function sliceTrack(track, from, to) {
 
 // ---------------------------------------------------------------- Höhen
 
-const eleCache = new Map();
-/** Höhen für eine Punktfolge über den Höhendienst von Open-Meteo (Geländemodell mit etwa 90 m Auflösung). */
+// Höhen aus Geländemodell-Kacheln (Terrarium-Format, frei verfügbar, ohne Abfragegrenze): Die Höhe steckt
+// in den Farbwerten jedes Pixels. Zoomstufe 12 entspricht in Mitteleuropa rund 25 m je Pixel.
+const DEM = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+const demCache = new Map();
+
+function demTile(z, x, y, signal) {
+  const key = z + '/' + x + '/' + y;
+  if (!demCache.has(key)) {
+    const job = (async () => {
+      const res = await fetch(DEM.replace('{z}', z).replace('{x}', x).replace('{y}', y), { signal });
+      if (!res.ok) throw new Error('Geländemodell ' + res.status);
+      const bmp = await createImageBitmap(await res.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+      const c = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(256, 256) : Object.assign(document.createElement('canvas'), { width: 256, height: 256 });
+      const g = c.getContext('2d', { willReadFrequently: true });
+      g.drawImage(bmp, 0, 0);
+      return g.getImageData(0, 0, 256, 256).data;
+    })();
+    demCache.set(key, job);
+    job.catch(() => demCache.delete(key));
+    if (demCache.size > 400) demCache.delete(demCache.keys().next().value);
+  }
+  return demCache.get(key);
+}
+
+async function elevationsDem(samples, signal) {
+  const world = (p, z) => {
+    const n = 256 * 2 ** z, r = (p.lat * Math.PI) / 180;
+    return [((p.lon + 180) / 360) * n, ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * n];
+  };
+  // Zoomstufe so wählen, dass höchstens 80 Kacheln nötig sind
+  let z = 12, need;
+  for (; z >= 8; z--) {
+    need = new Set();
+    for (const p of samples) { const [fx, fy] = world(p, z); need.add(Math.floor(fx / 256) + '/' + Math.floor(fy / 256)); }
+    if (need.size <= 80) break;
+  }
+  const tiles = new Map(), list = [...need];
+  let next = 0;
+  const worker = async () => { while (next < list.length) { const k = list[next++], [x, y] = k.split('/').map(Number); tiles.set(k, await demTile(z, x, y, signal)); } };
+  await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
+  const px = (X, Y) => {
+    const tx = Math.floor(X / 256), ty = Math.floor(Y / 256), d = tiles.get(tx + '/' + ty);
+    if (!d) return NaN;
+    const i = ((Y - ty * 256) * 256 + (X - tx * 256)) * 4;
+    return d[i] * 256 + d[i + 1] + d[i + 2] / 256 - 32768;
+  };
+  return samples.map((p) => {
+    // bilinear zwischen den vier umliegenden Pixeln
+    const [fx, fy] = world(p, z), X = Math.floor(fx - 0.5), Y = Math.floor(fy - 0.5), u = fx - 0.5 - X, v = fy - 0.5 - Y;
+    const a = px(X, Y), b = px(X + 1, Y), c = px(X, Y + 1), d = px(X + 1, Y + 1);
+    const e = a * (1 - u) * (1 - v) + b * u * (1 - v) + c * (1 - u) * v + d * u * v;
+    return Number.isFinite(e) ? e : [a, b, c, d].find(Number.isFinite);
+  });
+}
+
+// Ersatz, falls das Geländemodell nicht erreichbar ist: Open-Meteo, mit wenigen Punkten (jeder Punkt zählt dort als eigene Abfrage)
+async function elevationsMeteo(samples, signal) {
+  const step = Math.max(1, Math.ceil(samples.length / 300)), pick = samples.filter((_, i) => i % step === 0 || i === samples.length - 1);
+  const vals = [];
+  for (let k = 0; k < pick.length; k += 100) {
+    const part = pick.slice(k, k + 100);
+    const url = 'https://api.open-meteo.com/v1/elevation?latitude=' + part.map((p) => p.lat.toFixed(5)).join(',') + '&longitude=' + part.map((p) => p.lon.toFixed(5)).join(',');
+    const res = await fetch(url, { signal });
+    if (!res.ok) throw new Error('Höhendienst ' + res.status);
+    const ele = (await res.json()).elevation;
+    if (!Array.isArray(ele) || ele.length !== part.length) throw new Error('Höhendienst: unvollständige Antwort');
+    vals.push(...ele);
+  }
+  return samples.map((_, i) => { const j = Math.min(vals.length - 1, i / step), j0 = Math.floor(j), t = j - j0; return vals[j0] + ((vals[j0 + 1] ?? vals[j0]) - vals[j0]) * t; });
+}
+
+/** Höhen für eine Punktfolge: Punkte etwa alle 30 m (bei langen Strecken weiter), auf alle Punkte übertragen. */
 async function elevationsFor(pts, signal) {
   const cum = [0];
   for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + hav(pts[i - 1], pts[i]));
-  const total = cum[cum.length - 1], step = Math.max(90, total / 1500);
+  const total = cum[cum.length - 1], step = Math.max(30, total / 4000);
   const samples = [];
-  for (let d = 0, i = 0; d <= total + 1; d += step) {
-    while (i < pts.length - 2 && cum[i + 1] < d) i++;
-    const t = cum[i + 1] > cum[i] ? Math.min(1, (d - cum[i]) / (cum[i + 1] - cum[i])) : 0;
-    samples.push({ d, lat: pts[i].lat + (pts[i + 1].lat - pts[i].lat) * t, lon: pts[i].lon + (pts[i + 1].lon - pts[i].lon) * t });
+  for (let d = 0, i = 0; d <= total + step; d += step) {
+    const dd = Math.min(d, total);
+    while (i < pts.length - 2 && cum[i + 1] < dd) i++;
+    const t = cum[i + 1] > cum[i] ? Math.min(1, (dd - cum[i]) / (cum[i + 1] - cum[i])) : 0;
+    samples.push({ d: dd, lat: pts[i].lat + (pts[i + 1].lat - pts[i].lat) * t, lon: pts[i].lon + (pts[i + 1].lon - pts[i].lon) * t });
+    if (dd >= total) break;
   }
-  const vals = new Array(samples.length);
-  const chunks = [];
-  for (let k = 0; k < samples.length; k += 100) chunks.push(k);
-  let next = 0;
-  const worker = async () => {
-    while (next < chunks.length) {
-      const k = chunks[next++], part = samples.slice(k, k + 100);
-      const key = part.map((p) => p.lat.toFixed(4) + ',' + p.lon.toFixed(4)).join(';');
-      let ele = eleCache.get(key);
-      if (!ele) {
-        const url = 'https://api.open-meteo.com/v1/elevation?latitude=' + part.map((p) => p.lat.toFixed(5)).join(',') + '&longitude=' + part.map((p) => p.lon.toFixed(5)).join(',');
-        const res = await fetch(url, { signal });
-        if (!res.ok) throw new Error('Höhendienst ' + res.status);
-        ele = (await res.json()).elevation;
-        if (!Array.isArray(ele) || ele.length !== part.length) throw new Error('Höhendienst: unvollständige Antwort');
-        eleCache.set(key, ele);
-      }
-      ele.forEach((e, j) => { vals[k + j] = e; });
-    }
-  };
-  await Promise.all([worker(), worker(), worker()]);
-  // auf alle Punkte übertragen
+  let vals;
+  try { vals = await elevationsDem(samples, signal); } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    vals = await elevationsMeteo(samples, signal);
+  }
   return cum.map((d) => {
-    const i = Math.min(samples.length - 2, Math.floor(d / step));
-    if (i < 0) return vals[0];
-    const t = Math.min(1, Math.max(0, (d - samples[i].d) / step));
+    const i = Math.min(samples.length - 2, Math.max(0, Math.floor(d / step)));
+    const t = Math.min(1, Math.max(0, (d - samples[i].d) / ((samples[i + 1].d - samples[i].d) || 1)));
     return vals[i] + (vals[i + 1] - vals[i]) * t;
   });
 }

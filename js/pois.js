@@ -61,7 +61,7 @@ const cache = new WeakMap(); // Route -> { Kategorie: Stopps }
 
 // Fragt alle Server gleichzeitig und nimmt die erste brauchbare Antwort. Die öffentlichen Server sind
 // oft einzeln überlastet; so reicht es, wenn einer von ihnen gerade antwortet.
-export async function overpass(query, signal, timeoutMs = 35000) {
+export async function overpass(query, signal, timeoutMs = 35000, maxServers = SERVERS.length) {
   const ctrls = [], why = [];
   let busy = false;
   const ask = (url) => askOne(url).catch((e) => { why.push(new URL(url).hostname.split('.').slice(-2, -1)[0] + ': ' + (e.name === 'TypeError' ? 'keine Verbindung' : e.message)); throw e; });
@@ -82,7 +82,7 @@ export async function overpass(query, signal, timeoutMs = 35000) {
   const timer = setTimeout(stopAll, timeoutMs);
   if (signal) signal.addEventListener('abort', stopAll);
   try {
-    return await Promise.any(SERVERS.map(ask));
+    return await Promise.any(SERVERS.slice(0, maxServers).map(ask));
   } catch (e) {
     if (signal && signal.aborted) { const err = new Error('abgebrochen'); err.name = 'AbortError'; throw err; }
     // Kurzer Grund je Server, damit sich die Ursache eingrenzen lässt
