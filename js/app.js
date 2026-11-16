@@ -765,7 +765,8 @@ async function calcRoute() {
   const ctrl = routeCtrl;
   $('busy').hidden = false;
   try {
-    const r = await fetchRoute({ profile: state.profile, options: state.options[state.profile], points: pts, nogos: state.nogos, alt, signal: ctrl.signal });
+    const r = await fetchRoute({ profile: state.profile, options: state.options[state.profile], points: pts, nogos: state.nogos, alt, signal: ctrl.signal,
+      onProgress: (done, total) => { if (ctrl === routeCtrl && total > 1) toast(`Lange Strecke: wird in ${total} Etappen berechnet (${done} fertig) …`); } });
     if (ctrl !== routeCtrl) return;
     route = r;
     hideToast();

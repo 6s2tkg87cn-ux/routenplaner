@@ -118,22 +118,30 @@ export class RouteError extends Error {}
 const uploaded = new Map();
 
 async function uploadProfile(text, signal) {
-  if (uploaded.has(text)) return uploaded.get(text);
-  let res;
-  try {
-    res = await fetch(BROUTER + '/profile', { method: 'POST', body: text, signal });
-  } catch (e) {
-    if (e.name === 'AbortError') throw e;
-    throw new RouteError('Der Routing-Server ist nicht erreichbar. Prüfe deine Internetverbindung.');
+  // Als Versprechen merken, damit parallel berechnete Etappen das Profil nur einmal hochladen
+  if (!uploaded.has(text)) {
+    const job = (async () => {
+      let res;
+      try {
+        res = await fetch(BROUTER + '/profile', { method: 'POST', body: text, signal });
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        throw new RouteError('Der Routing-Server ist nicht erreichbar. Prüfe deine Internetverbindung.');
+      }
+      let data = null;
+      try { data = await res.json(); } catch (e) { /* unten behandelt */ }
+      if (!res.ok || !data || !data.profileid || data.error) {
+        throw new RouteError('Der Routing-Server hat das Profil abgelehnt' + (data && data.error ? ': ' + data.error : '.'));
+      }
+      return data.profileid;
+    })();
+    uploaded.set(text, job);
+    job.catch(() => uploaded.delete(text));
   }
-  let data = null;
-  try { data = await res.json(); } catch (e) { /* unten behandelt */ }
-  if (!res.ok || !data || !data.profileid || data.error) {
-    throw new RouteError('Der Routing-Server hat das Profil abgelehnt' + (data && data.error ? ': ' + data.error : '.'));
-  }
-  uploaded.set(text, data.profileid);
-  return data.profileid;
+  return uploaded.get(text);
 }
+
+const isTimeoutText = (m) => /watchdog|timeout|timed out|killed|time limit/i.test(m || '');
 
 function translateError(msg) {
   const m = (msg || '').toLowerCase();
@@ -144,22 +152,18 @@ function translateError(msg) {
   }
   if (m.includes('island')) return 'Ein Punkt liegt auf einem Wegstück, das mit diesem Profil nicht erreichbar ist. Verschiebe ihn ein Stück.';
   if (m.includes('no track found') || m.includes('target not found')) return 'Zwischen diesen Punkten wurde keine Route gefunden. Lockere die Optionen oder entferne Sperrzonen.';
-  if (m.includes('watchdog') || m.includes('timeout') || m.includes('killed')) return 'Die Berechnung hat zu lange gedauert. Setze Zwischenziele, um lange Strecken aufzuteilen.';
+  if (isTimeoutText(m)) return 'Auch in Etappen hat die Berechnung zu lange gedauert. Setze ein oder zwei Zwischenziele auf der gewünschten Strecke.';
   if (m.includes('busy') || m.includes('overload')) return 'Der Routing-Server ist gerade ausgelastet. Versuche es gleich noch einmal.';
   return 'Die Route konnte nicht berechnet werden' + (msg ? ' (' + msg.trim().slice(0, 140) + ')' : '') + '.';
 }
 
-/**
- * Berechnet eine Route.
- * points: [{lat, lon}], nogos: [{lat, lon, radius}], alt: 0..3
- */
-export async function fetchRoute({ profile, options, points, nogos = [], alt = 0, signal }) {
-  const text = await buildProfileText(profile, options);
+// Eine Anfrage an BRouter. profileId: hochgeladenes Profil oder eingebautes (z. B. 'trekking').
+// Liefert die Rohantwort (GeoJSON). Bei Zeitüberschreitung ist error.timeout gesetzt.
+async function requestGeo({ text, profileId, points, nogos = [], alt = 0, signal }) {
   const lonlats = points.map((p) => p.lon.toFixed(6) + ',' + p.lat.toFixed(6)).join('|');
   const nogoStr = nogos.map((n) => n.lon.toFixed(6) + ',' + n.lat.toFixed(6) + ',' + Math.round(n.radius)).join('|');
-
   for (let attempt = 0; attempt < 2; attempt++) {
-    const id = await uploadProfile(text, signal);
+    const id = profileId || await uploadProfile(text, signal);
     const url = BROUTER + '?lonlats=' + encodeURIComponent(lonlats) + '&profile=' + id + '&alternativeidx=' + alt +
       '&format=geojson&timode=2' + (nogoStr ? '&nogos=' + encodeURIComponent(nogoStr) : '');
     let res;
@@ -170,19 +174,148 @@ export async function fetchRoute({ profile, options, points, nogos = [], alt = 0
       throw new RouteError('Der Routing-Server ist nicht erreichbar. Prüfe deine Internetverbindung.');
     }
     if (res.ok) {
-      let json;
-      try { json = await res.json(); } catch (e) { throw new RouteError('Der Routing-Server hat eine unlesbare Antwort geschickt.'); }
-      return parseRoute(json);
+      try { return await res.json(); } catch (e) { throw new RouteError('Der Routing-Server hat eine unlesbare Antwort geschickt.'); }
     }
     const body = await res.text().catch(() => '');
+    if (isTimeoutText(body) || res.status === 504) {
+      const err = new RouteError(translateError(body || 'timeout'));
+      err.timeout = true;
+      throw err;
+    }
     // Profil auf dem Server abgelaufen: einmal neu hochladen.
-    if (attempt === 0 && (res.status >= 500 || res.status === 404 || /profile/i.test(body))) {
+    if (!profileId && attempt === 0 && (res.status >= 500 || res.status === 404 || /profile/i.test(body))) {
       uploaded.delete(text);
       continue;
     }
     throw new RouteError(translateError(body));
   }
   throw new RouteError('Die Route konnte nicht berechnet werden.');
+}
+
+const airLength = (points) => points.reduce((s, p, i) => (i ? s + haversine(points[i - 1].lat, points[i - 1].lon, p.lat, p.lon) : 0), 0);
+
+/**
+ * Berechnet eine Route.
+ * points: [{lat, lon}], nogos: [{lat, lon, radius}], alt: 0..3
+ * Lange Strecken werden in Etappen berechnet (der öffentliche Server bricht einzelne Anfragen nach etwa einer Minute ab).
+ * onProgress(fertig, gesamt) meldet den Fortschritt der Etappen.
+ */
+export async function fetchRoute({ profile, options, points, nogos = [], alt = 0, signal, onProgress }) {
+  const text = await buildProfileText(profile, options);
+  if (airLength(points) < LONG_AIR) {
+    try {
+      return parseRoute(await requestGeo({ text, points, nogos, alt, signal }));
+    } catch (e) {
+      if (!e.timeout) throw e;
+      // auch kürzere Strecken können zu lange dauern (z. B. im Gebirge): dann enger aufteilen
+      return fetchInStages({ text, points, nogos, alt, signal, onProgress, splitAir: 35000 });
+    }
+  }
+  return fetchInStages({ text, points, nogos, alt, signal, onProgress, splitAir: STAGE_AIR });
+}
+
+const LONG_AIR = 140000;  // ab dieser Luftlinie (Summe aller Abschnitte) direkt in Etappen rechnen
+const STAGE_AIR = 70000;  // längere Abschnitte bekommen Zwischenpunkte
+const STAGE_ROUTE = 55000; // Abstand der Zwischenpunkte entlang der Grobroute
+const coarseCache = new Map();
+
+// Grobe Route mit dem eingebauten, schnellen Profil "trekking". Sie dient nur dazu, sinnvolle Zwischenpunkte
+// auf befahrbaren Wegen zu finden. Dauert auch sie zu lange, wird an der Luftlinien-Mitte geteilt.
+async function coarseLine(a, b, nogos, signal, depth = 0) {
+  try {
+    const g = await requestGeo({ profileId: 'trekking', points: [a, b], nogos, signal });
+    return g.features[0].geometry.coordinates.map((c) => ({ lon: c[0], lat: c[1] }));
+  } catch (e) {
+    if (!e.timeout || depth >= 2) throw e;
+    const m = { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 };
+    const [x, y] = await Promise.all([coarseLine(a, m, nogos, signal, depth + 1), coarseLine(m, b, nogos, signal, depth + 1)]);
+    return [...x, ...y.slice(1)];
+  }
+}
+
+async function stagePoints(a, b, nogos, signal, spacing) {
+  const key = [a.lat, a.lon, b.lat, b.lon, spacing, nogos.map((n) => n.lat + ',' + n.lon + ',' + n.radius).join(';')].map(String).join('|');
+  if (!coarseCache.has(key)) {
+    const job = (async () => {
+      const line = await coarseLine(a, b, nogos, signal);
+      const cum = [0];
+      for (let i = 1; i < line.length; i++) cum.push(cum[i - 1] + haversine(line[i - 1].lat, line[i - 1].lon, line[i].lat, line[i].lon));
+      const total = cum[cum.length - 1], n = Math.max(1, Math.round(total / spacing));
+      const pts = [];
+      for (let k = 1; k < n; k++) {
+        const d = (total * k) / n;
+        let i = 1;
+        while (i < line.length - 1 && cum[i] < d) i++;
+        pts.push({ lat: line[i].lat, lon: line[i].lon });
+      }
+      return pts;
+    })();
+    coarseCache.set(key, job);
+    job.catch(() => coarseCache.delete(key));
+  }
+  return coarseCache.get(key);
+}
+
+async function fetchInStages({ text, points, nogos, alt, signal, onProgress, splitAir }) {
+  // 1. Abschnitte zwischen den Wegpunkten; lange Abschnitte über eine Grobroute in Etappen teilen
+  const spacing = splitAir < STAGE_AIR ? 28000 : STAGE_ROUTE;
+  const chains = await Promise.all(points.slice(1).map(async (b, i) => {
+    const a = points[i];
+    if (haversine(a.lat, a.lon, b.lat, b.lon) <= splitAir) return [a, b];
+    return [a, ...(await stagePoints(a, b, nogos, signal, spacing)), b];
+  }));
+  const legs = [];
+  for (const c of chains) for (let k = 1; k < c.length; k++) legs.push([c[k - 1], c[k]]);
+
+  // 2. Etappen parallel berechnen (höchstens drei gleichzeitig, um den Server zu schonen)
+  const out = new Array(legs.length);
+  let next = 0, done = 0;
+  if (onProgress) onProgress(0, legs.length);
+  const worker = async () => {
+    while (next < legs.length) {
+      const k = next++;
+      out[k] = await requestGeo({ text, points: legs[k], nogos, alt, signal });
+      done++;
+      if (onProgress) onProgress(done, legs.length);
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  return parseRoute(mergeGeo(out));
+}
+
+// Fügt Etappen zu einer Route zusammen. An den Nahtstellen fehlen Abbiegehinweise des Servers;
+// sie werden aus der Form der Strecke ergänzt.
+function mergeGeo(list) {
+  const coords = [], msgs = [], hints = [], seams = [];
+  let ascent = 0, hasAscent = true;
+  list.forEach((g, k) => {
+    const f = g.features[0], p = f.properties || {};
+    const off = k ? coords.length - 1 : 0;
+    if (k) seams.push(coords.length - 1);
+    coords.push(...(k ? f.geometry.coordinates.slice(1) : f.geometry.coordinates));
+    if (Array.isArray(p.messages) && p.messages.length) { if (!msgs.length) msgs.push(p.messages[0]); msgs.push(...p.messages.slice(1)); }
+    if (Array.isArray(p.voicehints)) for (const h of p.voicehints) hints.push([h[0] + off, ...h.slice(1)]);
+    const a = parseFloat(p['filtered ascend']);
+    if (Number.isFinite(a)) ascent += a; else hasAscent = false;
+  });
+  const dist = (i, j) => haversine(coords[i][1], coords[i][0], coords[j][1], coords[j][0]);
+  const brg = (i, j) => {
+    const r = Math.PI / 180, [lo1, la1] = coords[i], [lo2, la2] = coords[j];
+    const y = Math.sin((lo2 - lo1) * r) * Math.cos(la2 * r), x = Math.cos(la1 * r) * Math.sin(la2 * r) - Math.sin(la1 * r) * Math.cos(la2 * r) * Math.cos((lo2 - lo1) * r);
+    return Math.atan2(y, x) / r;
+  };
+  for (const j of seams) {
+    let i0 = j, i1 = j;
+    while (i0 > 0 && dist(i0, j) < 25) i0--;
+    while (i1 < coords.length - 1 && dist(j, i1) < 25) i1++;
+    if (i0 === j || i1 === j) continue;
+    const ang = ((brg(j, i1) - brg(i0, j) + 540) % 360) - 180;
+    if (Math.abs(ang) >= 40) hints.push([j, 0, 0, 0, Math.round(ang), '']);
+  }
+  hints.sort((x, y) => x[0] - y[0]);
+  const props = { messages: msgs, voicehints: hints };
+  if (hasAscent) props['filtered ascend'] = String(Math.round(ascent));
+  return { type: 'FeatureCollection', features: [{ type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates: coords } }] };
 }
 
 // ---------------------------------------------------------------- Auswertung
