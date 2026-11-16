@@ -1182,7 +1182,7 @@ let rtList = [], rtSel = null, rtSec = null, rtCtrl = null, rtMarkers = [], rtLo
 let rtLoading = null;   // Route, deren Strecke gerade geladen wird (Ansicht ist schon offen)
 let rtMode = 'whole';   // whole: ganze Route, part: Abschnitt, loop: Runde mit Wunschlänge
 let rtSearchCtrl = null, rtSearched = false;
-let rtBbox = null, rtLenReady = false, rtPreBusy = false;
+let rtBbox = null, rtLenReady = false, rtLenFailed = false, rtPreBusy = false, rtPreAgain = false;
 const RT_KINDS = [['bicycle', 'Rad'], ['mtb', 'MTB'], ['hiking', 'Wandern']];
 const RT_LEN = [5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200, 300, 500, 0]; // Stufen des Schiebers, 0 = beliebig
 const rtKindOf = (r) => (r.kind === 'foot' ? 'hiking' : r.kind);
@@ -1261,8 +1261,9 @@ function renderRtLoopKm() {
     'aria-pressed': String(state.round.km === v), text: v + ' km', onclick: () => { state.round.km = v; $('roundKm').value = v; save(); renderRoundChips(); renderRtLoopKm(); } })));
 }
 
-function rtStatus(text) { $('rtStatus').hidden = !text; $('rtStatus').textContent = text || ''; }
+function rtStatus(text) { $('rtStatus').hidden = !text; $('rtStatus').textContent = text || ''; $('rtStatus').dataset.lines = ''; }
 
+const QUICK_ONLY = 'Das sind nur die wichtigsten Routen. Die vollständige Liste ist gerade nicht erreichbar; suche gleich noch einmal.';
 async function runRtSearch() {
   if (!online()) return toast('Die Suche nach Routen braucht Internet.', true);
   if (map.getZoom() < 7) return rtStatus('Zoome näher heran. Bei sehr großen Ausschnitten dauert die Suche zu lange.');
@@ -1272,7 +1273,7 @@ async function runRtSearch() {
   rtSearched = true;
   rtList = [];
   rtOpen = {};
-  rtBbox = bbox; rtLenReady = false;
+  rtBbox = bbox; rtLenReady = false; rtLenFailed = false;
   renderRtList();
   rtStatus('Routen werden gesucht …');
   $('btnRtSearch').disabled = true;
@@ -1281,8 +1282,9 @@ async function runRtSearch() {
   searchRoutesQuick(bbox, ctrl.signal).then((quick) => {
     if (ctrl !== rtSearchCtrl || full || !quick.length) return;
     rtList = quick;
-    rtStatus(failed ? '' : 'Erste Treffer. Die Liste wird noch vervollständigt …');
+    rtStatus(failed ? QUICK_ONLY : 'Erste Treffer. Die Liste wird noch vervollständigt …');
     if (!rtSel && !rtLoading) renderRtList();
+    if (failed) ensurePreviews();
   }).catch(() => { /* dann nur die vollständige Liste */ });
   try {
     const list = await searchRoutes(bbox, ctrl.signal);
@@ -1295,40 +1297,49 @@ async function runRtSearch() {
     if (e.name === 'AbortError' || ctrl !== rtSearchCtrl) return;
     failed = true;
     // Die schnelle Liste reicht zum Weitermachen (kommt sie erst noch, ersetzt sie die Meldung); nur ohne sie ist es ein Fehler
-    rtStatus(rtList.length ? '' : (e.message || 'Die Routen konnten nicht geladen werden.'));
+    rtStatus(rtList.length ? QUICK_ONLY : (e.message || 'Die Routen konnten nicht geladen werden.'));
   } finally { if (ctrl === rtSearchCtrl) $('btnRtSearch').disabled = false; }
-  if (ctrl === rtSearchCtrl && full && rtList.length) ensurePreviews();
+  if (ctrl === rtSearchCtrl && rtList.length) ensurePreviews();
 }
 
-// Linien für die Karte im Hintergrund laden: zuerst die Routen, die gerade in der Liste stehen (in Portionen, die
-// wichtigsten zuerst), dazwischen einmal die Längen für den Schieber. Wechselt die Auswahl, lädt der Rest nach.
+// Linien für die Karte im Hintergrund laden: eine Abfrage für die Routen, die gerade in der Liste stehen (die
+// wichtigsten zuerst). Die Längen für den Schieber kommen nur, wenn er benutzt wird. Zwischen zwei Abfragen liegt
+// eine Pause, weil die öffentlichen Server schnelle Folgen abweisen.
 async function ensurePreviews() {
-  if (rtPreBusy || !rtBbox || !rtSearchCtrl) return;
-  const ctrl = rtSearchCtrl, bbox = rtBbox;
-  rtPreBusy = true;
-  let sorted = false;
+  if (!rtBbox || !rtSearchCtrl) return;
+  if (rtPreBusy) { rtPreAgain = true; return; }
+  const ctrl = rtSearchCtrl, bbox = rtBbox, mine = () => ctrl === rtSearchCtrl;
+  const pause = (ms) => new Promise((f) => setTimeout(f, ms));
+  const note = (text) => { if (mine() && !rtSel && !rtLoading && (!$('rtStatus').textContent || $('rtStatus').dataset.lines)) { rtStatus(text); $('rtStatus').dataset.lines = text ? '1' : ''; } };
+  rtPreBusy = true; rtPreAgain = false;
   try {
-    for (let round = 0; round < 6; round++) {
-      const ids = rtVisible().filter((r) => !hasPreview(r.id)).slice(0, 40).map((r) => r.id);
-      if (!ids.length && rtLenReady) break;
-      if (ids.length) {
+    const ids = rtVisible().filter((r) => !hasPreview(r.id)).slice(0, 60).map((r) => r.id);
+    if (ids.length) {
+      note('Linien für die Karte werden geladen …');
+      await pause(700);
+      try {
         const km = await prefetchPreviews(ids, bbox, ctrl.signal);
-        if (ctrl !== rtSearchCtrl) return;
+        if (!mine()) return;
         for (const r of rtList) if (km.has(r.id)) r.visKm = km.get(r.id);
-        sorted = true;
-        renderRtAll();
-      }
-      if (!rtLenReady) {
-        const need = rtList.filter((r) => !r.km).slice(0, 150).map((r) => r.id);
-        try { const len = await fetchRouteLengths(need, ctrl.signal); for (const r of rtList) if (len.has(r.id)) r.lenKm = len.get(r.id); } catch (e) { if (ctrl !== rtSearchCtrl) return; /* dann filtert der Schieber nur eingetragene Längen */ }
-        if (ctrl !== rtSearchCtrl) return;
-        rtLenReady = true;
+        rtList.sort(byImportance);
+        note('');
         if (!rtSel && !rtLoading) renderRtList();
+      } catch (e) {
+        if (!mine()) return;
+        note('Die Linien für die Karte konnten nicht geladen werden. ' + (e.message || '') + ' Die Liste funktioniert trotzdem.');
+        return;
       }
     }
-  } catch (e) { /* Linien laden dann beim Überfahren einzeln */ } finally {
+    if (state.rtMaxKm && !rtLenReady) {
+      const need = rtList.filter((r) => !r.km).slice(0, 150).map((r) => r.id);
+      await pause(700);
+      try { const len = await fetchRouteLengths(need, ctrl.signal); for (const r of rtList) if (len.has(r.id)) r.lenKm = len.get(r.id); rtLenReady = true; } catch (e) { rtLenFailed = true; }
+      if (!mine()) return;
+      if (!rtSel && !rtLoading) renderRtList();
+    }
+  } finally {
     rtPreBusy = false;
-    if (sorted && ctrl === rtSearchCtrl) { rtList.sort(byImportance); if (!rtSel && !rtLoading) renderRtList(); }
+    if (rtPreAgain && mine()) ensurePreviews();
   }
 }
 
@@ -1373,6 +1384,7 @@ function renderRtList() {
   label, h('span', { class: 'rt-count', text: String(rtList.filter((r) => rtKindOf(r) === k && rtPasses(r)).length) }))));
   $('rtLen').value = Math.max(0, RT_LEN.indexOf(state.rtMaxKm));
   $('rtLenOut').textContent = state.rtMaxKm ? `bis ${state.rtMaxKm} km` : 'beliebig';
+  if (state.rtMaxKm && !rtLenReady && rtList.length) host.append(h('p', { class: 'hint', text: rtLenFailed ? 'Die Längen konnten nicht geladen werden. Routen ohne eingetragene Länge bleiben deshalb sichtbar.' : 'Längen werden geladen. Bis dahin bleiben Routen ohne eingetragene Länge sichtbar.' }));
   const list = rtVisible();
   if (rtList.length && !list.length) {
     const other = RT_KINDS.find(([k]) => rtList.some((r) => rtKindOf(r) === k && rtPasses(r)));

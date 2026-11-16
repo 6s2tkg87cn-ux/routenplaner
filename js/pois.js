@@ -59,11 +59,19 @@ const SERVERS = ['https://overpass-api.de/api/interpreter', 'https://maps.mail.r
   'https://overpass.kumi.systems/api/interpreter', 'https://overpass.openstreetmap.fr/api/interpreter'];
 const cache = new WeakMap(); // Route -> { Kategorie: Stopps }
 
-// Fragt alle Server gleichzeitig und nimmt die erste brauchbare Antwort. Die öffentlichen Server sind
-// oft einzeln überlastet; so reicht es, wenn einer von ihnen gerade antwortet.
-export async function overpass(query, signal, timeoutMs = 35000, maxServers = SERVERS.length) {
+// Fragt mehrere Server und nimmt die erste brauchbare Antwort. Die öffentlichen Server sind oft einzeln
+// überlastet; so reicht es, wenn einer von ihnen gerade antwortet. Mit "stagger" (ms) starten die Server
+// nacheinander: der nächste erst, wenn der vorige so lange nicht geantwortet hat oder gescheitert ist. Das
+// schont die Server, die jede Abfrage sonst alle zu Ende rechnen und weitere Abfragen dann abweisen.
+export async function overpass(query, signal, timeoutMs = 35000, maxServers = SERVERS.length, stagger = 0) {
   const ctrls = [], why = [];
-  let busy = false;
+  let busy = false, failed = 0, over = false;
+  const t0 = Date.now();
+  // wartet, bis Server i an der Reihe ist; false, wenn inzwischen eine Antwort da ist oder abgebrochen wurde
+  const turn = async (i) => {
+    while (stagger && !over && Date.now() - t0 < (i - failed) * stagger) await new Promise((f) => setTimeout(f, 150));
+    return !over;
+  };
   const ask = (url) => askOne(url).catch((e) => { why.push(new URL(url).hostname.split('.').slice(-2, -1)[0] + ': ' + (e.name === 'TypeError' ? 'keine Verbindung' : e.message)); throw e; });
   const askOne = async (url) => {
     const ctrl = new AbortController();
@@ -78,11 +86,14 @@ export async function overpass(query, signal, timeoutMs = 35000, maxServers = SE
     if (json.remark && /runtime error|timed out|out of memory/i.test(json.remark)) { busy = true; throw new Error(json.remark); }
     return json;
   };
-  const stopAll = () => ctrls.forEach((c) => c.abort());
+  const stopAll = () => { over = true; ctrls.forEach((c) => c.abort()); };
   const timer = setTimeout(stopAll, timeoutMs);
   if (signal) signal.addEventListener('abort', stopAll);
   try {
-    return await Promise.any(SERVERS.slice(0, maxServers).map(ask));
+    return await Promise.any(SERVERS.slice(0, maxServers).map(async (url, i) => {
+      if (!(await turn(i))) throw new Error('nicht mehr nötig');
+      try { return await ask(url); } catch (e) { failed++; throw e; }
+    }));
   } catch (e) {
     if (signal && signal.aborted) { const err = new Error('abgebrochen'); err.name = 'AbortError'; throw err; }
     // Kurzer Grund je Server, damit sich die Ursache eingrenzen lässt

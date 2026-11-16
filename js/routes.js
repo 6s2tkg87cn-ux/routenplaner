@@ -30,8 +30,13 @@ const looksRound = (name) => /rund(weg|wanderweg|tour|kurs|e\b)|runde\b|\bloop\b
 export async function searchRoutes(bbox, signal) {
   const kinds = 'bicycle|mtb|hiking|foot';
   const b = bbox.map((v) => v.toFixed(4)).join(',');
-  const q = `[out:json][timeout:20];rel[type=route][route~"^(${kinds})$"](${b})->.r;.r out tags;rel(br.r)[type~"^(route|superroute)$"]->.p;.p out body;`;
-  const json = await overpass(q, signal, 30000);
+  const q = (out) => `[out:json][timeout:25];rel[type=route][route~"^(${kinds})$"](${b})->.r;.r out ${out};rel(br.r)[type~"^(route|superroute)$"]->.p;.p out body;`;
+  let json;
+  try { json = await overpass(q('tags'), signal, 30000, 5, 2000); } catch (e) {
+    if (e.name === 'AbortError') throw e;
+    // zweiter Versuch mit der früheren, größeren Abfrage
+    json = await overpass(q('body'), signal, 35000, 5, 2000);
+  }
   const map = new Map();
   for (const e of json.elements || []) {
     if (e.type !== 'relation') continue;
@@ -125,7 +130,7 @@ export async function loadRouteTrack(id, signal) {
   const job = (async () => {
     const stored = await readStored(id);
     if (stored) return stored;
-    const json = await overpass(q, signal, 95000);
+    const json = await overpass(q, signal, 95000, 5, 4000);
     const rels = new Map(), ways = new Map();
     for (const e of json.elements || []) {
       if (e.type === 'relation') rels.set(e.id, e);
@@ -182,7 +187,7 @@ export async function prefetchPreviews(ids, bbox, signal) {
   if (!ids.length) return new Map();
   const b = bbox.map((v) => v.toFixed(3)).join(',');
   const q = `[out:json][timeout:25];rel(id:${ids.join(',')})->.t;rel(r.t)->.c;rel(r.c)->.c2;(.t;.c;.c2;)->.a;.a out body;way(r.a)(${b});out geom qt;`;
-  const json = await overpass(q, signal, 30000, 3);
+  const json = await overpass(q, signal, 35000, 5, 3000);
   const rels = new Map(), ways = new Map();
   for (const e of json.elements || []) { if (e.type === 'relation') rels.set(e.id, e); else if (e.type === 'way') ways.set(e.id, e); }
   const out = new Map();
@@ -211,7 +216,7 @@ export const hasPreview = (id) => prefetched.has(id);
  */
 export async function fetchRouteLengths(ids, signal) {
   if (!ids.length) return new Map();
-  const json = await overpass(`[out:json][timeout:25];rel(id:${ids.join(',')});convert rel ::id=id(),len=length();out;`, signal, 30000, 3);
+  const json = await overpass(`[out:json][timeout:25];rel(id:${ids.join(',')});convert rel ::id=id(),len=length();out;`, signal, 30000, 5, 3000);
   const out = new Map();
   for (const e of json.elements || []) { const v = parseFloat(e.tags && e.tags.len); if (v > 0) out.set(e.id, v / 1000); }
   return out;
@@ -237,7 +242,7 @@ export async function previewRoute(id, bbox, signal) {
   const key = id + '|' + b;
   if (!prevCache.has(key)) {
     const q = `[out:json][timeout:15];rel(${id})->.t;rel(r.t)->.c;rel(r.c)->.c2;(.t;.c;.c2;)->.a;way(r.a)(${b});out geom qt;`;
-    const job = overpass(q, signal, 20000).then((json) => linesOf((json.elements || []).filter((e) => e.type === 'way')).fc);
+    const job = overpass(q, signal, 20000, 5, 2000).then((json) => linesOf((json.elements || []).filter((e) => e.type === 'way')).fc);
     prevCache.set(key, job);
     job.catch(() => prevCache.delete(key));
   }
