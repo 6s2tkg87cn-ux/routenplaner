@@ -15,6 +15,7 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 
 - Hin und zurück sowie automatische Rundtouren nach Wunschlänge, Richtung und Höhenmeter-Vorliebe
 - Umweg von A nach B auf Wunschlänge, Stopps an der Strecke (Trinkwasser, Café, Einkehr, Supermarkt, Radladen)
+- Eingetragene Rad- und Wanderrouten (z. B. Donauradweg) im Kartenausschnitt finden, ganz oder abschnittsweise als Tour fahren, mit Anfahrt, Rückweg oder als Runde mit Wunschlänge
 - Anstiege einzeln ausgewiesen, Fahrzeit aus Steigung und Untergrund berechnet
 - Tour-Link zum Teilen, Regenradar als Überlagerung, Rundtour über einen Wunschpunkt
 - Touren speichern, GPX-Import
@@ -28,8 +29,8 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 |---|---|
 | Routing | [BRouter](https://brouter.de) (öffentlicher Server) |
 | Karten | [OpenFreeMap](https://openfreemap.org) (Standard), [CyclOSM](https://www.cyclosm.org), [OpenTopoMap](https://opentopomap.org), TopPlusOpen (BKG), basemap.at, Esri (Satellit); Routen-Überlagerung von [Waymarked Trails](https://waymarkedtrails.org) |
-| Wetter | [Open-Meteo](https://open-meteo.com) |
-| Stopps | [Overpass API](https://overpass-api.de) |
+| Wetter, Höhen für Routen | [Open-Meteo](https://open-meteo.com) |
+| Stopps, Routen | [Overpass API](https://overpass-api.de) |
 | Regenradar | [RainViewer](https://www.rainviewer.com) |
 | Suche | [Photon](https://photon.komoot.io) |
 | Kartendaten | © [OpenStreetMap](https://www.openstreetmap.org/copyright)-Mitwirkende |
@@ -42,6 +43,7 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
   - `js/roundtrip.js` – Rundtouren und Umwege auf Wunschlänge
   - `js/weather.js` – Wetter und Wind entlang der Strecke
   - `js/pois.js` – Stopps an der Strecke
+  - `js/routes.js` – eingetragene Routen: Suche, Zusammensetzen der Strecke, Tour daraus
   - `js/offline.js` – Offline-Touren
   - `js/elevation.js` – Höhenprofil
 - `sw.js` – Service Worker (App-Dateien und Offline-Karte)

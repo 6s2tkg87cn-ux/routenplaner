@@ -200,18 +200,19 @@ const airLength = (points) => points.reduce((s, p, i) => (i ? s + haversine(poin
  * Lange Strecken werden in Etappen berechnet (der öffentliche Server bricht einzelne Anfragen nach etwa einer Minute ab).
  * onProgress(fertig, gesamt) meldet den Fortschritt der Etappen.
  */
-export async function fetchRoute({ profile, options, points, nogos = [], alt = 0, signal, onProgress }) {
+export async function fetchRoute({ profile, options, points, nogos = [], alt = 0, signal, onProgress, raw = false }) {
   const text = await buildProfileText(profile, options);
   if (airLength(points) < LONG_AIR) {
     try {
-      return parseRoute(await requestGeo({ text, points, nogos, alt, signal }));
+      const geo = await requestGeo({ text, points, nogos, alt, signal });
+      return raw ? geo : parseRoute(geo);
     } catch (e) {
       if (!e.timeout) throw e;
       // auch kürzere Strecken können zu lange dauern (z. B. im Gebirge): dann enger aufteilen
-      return fetchInStages({ text, points, nogos, alt, signal, onProgress, splitAir: 35000 });
+      return fetchInStages({ text, points, nogos, alt, signal, onProgress, splitAir: 35000, raw });
     }
   }
-  return fetchInStages({ text, points, nogos, alt, signal, onProgress, splitAir: STAGE_AIR });
+  return fetchInStages({ text, points, nogos, alt, signal, onProgress, splitAir: STAGE_AIR, raw });
 }
 
 const LONG_AIR = 140000;  // ab dieser Luftlinie (Summe aller Abschnitte) direkt in Etappen rechnen
@@ -256,7 +257,7 @@ async function stagePoints(a, b, nogos, signal, spacing) {
   return coarseCache.get(key);
 }
 
-async function fetchInStages({ text, points, nogos, alt, signal, onProgress, splitAir }) {
+async function fetchInStages({ text, points, nogos, alt, signal, onProgress, splitAir, raw }) {
   // 1. Abschnitte zwischen den Wegpunkten; lange Abschnitte über eine Grobroute in Etappen teilen
   const spacing = splitAir < STAGE_AIR ? 28000 : STAGE_ROUTE;
   const chains = await Promise.all(points.slice(1).map(async (b, i) => {
@@ -280,12 +281,13 @@ async function fetchInStages({ text, points, nogos, alt, signal, onProgress, spl
     }
   };
   await Promise.all([worker(), worker(), worker()]);
-  return parseRoute(mergeGeo(out));
+  const geo = mergeGeo(out);
+  return raw ? geo : parseRoute(geo);
 }
 
 // Fügt Etappen zu einer Route zusammen. An den Nahtstellen fehlen Abbiegehinweise des Servers;
 // sie werden aus der Form der Strecke ergänzt.
-function mergeGeo(list) {
+export function mergeGeo(list) {
   const coords = [], msgs = [], hints = [], seams = [];
   let ascent = 0, hasAscent = true;
   list.forEach((g, k) => {

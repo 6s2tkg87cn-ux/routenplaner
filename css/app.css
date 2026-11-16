@@ -83,6 +83,23 @@ a { color: inherit; }
 .panel-scroll > [data-tab] { display: none; }
 body[data-tab=plan] .panel-scroll > [data-tab~=plan], body[data-tab=tour] .panel-scroll > [data-tab~=tour], body[data-tab=wetter] .panel-scroll > [data-tab~=wetter],
 body[data-tab=stopps] .panel-scroll > [data-tab~=stopps], body[data-tab=touren] .panel-scroll > [data-tab~=touren] { display: block; }
+body[data-tab=routen] .panel-scroll > [data-tab~=routen] { display: block; }
+body[data-tab=routen] .panel-scroll > [data-tab~=routen][hidden] { display: none; }
+/* Tour auf einer eingetragenen Route: Wegpunkte gibt es dann nicht */
+body.route-tour #wpList, body.route-tour #mapHint, body.route-tour #routeExtras, body.route-tour #roundBlock, body.route-tour #modeSeg, body.route-tour #roundStatus { display: none !important; }
+.rt-info { display: grid; gap: 4px; background: var(--field); border-radius: var(--r); padding: 12px; }
+.rt-info-name { font-weight: 600; }
+.rt-info-sub { font-size: 13px; color: var(--ink-2); }
+.rt-info .btn-row { margin-top: 8px; }
+.rt-info .ghost-btn { background: var(--panel); }
+.rt-lead { margin: 0 0 12px; }
+.rt-name { margin-top: 10px; }
+.rt-meta { margin: -6px 0 14px; }
+.rt-meta a { color: var(--accent); }
+.rt-sec { margin: 0 0 6px; font-weight: 500; }
+#rtSel h3 { margin-top: 18px; }
+.rt-list .cand-name { font-weight: 600; }
+.pin-sec { width: 26px; height: 26px; background: #2a78d6; color: #fff; font-size: 12px; }
 .panel-scroll > .tabs + [data-tab], .panel-scroll > section[data-tab]:not(.block-first) { border-top: 0; padding-top: 0; }
 body[data-tab=plan] .panel-scroll > [data-tab~=plan]:not(.block-first) { border-top: 1px solid var(--line); padding-top: 16px; }
 body.has-route .tab-empty { display: none !important; }

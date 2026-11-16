@@ -38,6 +38,14 @@
       </section>
 
       <section class="block" aria-label="Planung" data-tab="plan">
+        <div id="rtInfo" class="rt-info" hidden>
+          <span class="rt-info-name" id="rtInfoName"></span>
+          <span class="rt-info-sub" id="rtInfoSub"></span>
+          <div class="btn-row">
+            <button id="btnRtEdit" class="ghost-btn" type="button">Abschnitt ändern</button>
+            <button id="btnRtConvert" class="ghost-btn" type="button">In normale Route umwandeln</button>
+          </div>
+        </div>
         <ol id="wpList" class="wp-list"></ol>
         <p class="hint" id="mapHint"></p>
 
@@ -86,6 +94,48 @@
         <h2>Vorschläge</h2>
         <ul id="candList" class="cand-list"></ul>
         <button id="btnEditWp" class="link-btn" type="button">Wegpunkte bearbeiten</button>
+      </section>
+
+      <section class="block" data-tab="routen" id="rtSearch">
+        <h2>Routen</h2>
+        <p class="hint rt-lead">Eingetragene Rad- und Wanderrouten im sichtbaren Kartenausschnitt, passend zum gewählten Typ.</p>
+        <button id="btnRtSearch" class="primary-btn wide" type="button">Routen im Kartenausschnitt suchen</button>
+        <p class="hint" id="rtStatus" hidden></p>
+        <ul id="rtList" class="cand-list rt-list"></ul>
+      </section>
+
+      <section class="block" data-tab="routen" id="rtSel" hidden>
+        <button id="btnRtBack" class="link-btn" type="button">Zurück zur Liste</button>
+        <h2 id="rtName" class="rt-name"></h2>
+        <p class="hint rt-meta" id="rtMeta"></p>
+        <h3>Abschnitt</h3>
+        <p id="rtSecText" class="rt-sec"></p>
+        <p class="hint rt-lead">Tippe auf die blaue Linie, um Anfang und Ende zu setzen.</p>
+        <div class="btn-row">
+          <button id="btnRtWhole" class="ghost-btn" type="button">Ganze Route</button>
+          <button id="btnRtReverse" class="ghost-btn" type="button">Richtung umkehren</button>
+        </div>
+        <div class="mode-body">
+          <div class="row-toggle">
+            <label for="rtApproach"><span class="opt-label">Anfahrt vom Start</span><span class="opt-note" id="rtStartNote"></span></label>
+            <input type="checkbox" id="rtApproach" class="switch">
+          </div>
+          <div class="row-toggle">
+            <label for="rtBackSw"><span class="opt-label">Zurück zum Start</span><span class="opt-note">Rückweg möglichst nicht auf dem Abschnitt.</span></label>
+            <input type="checkbox" id="rtBackSw" class="switch">
+          </div>
+          <button id="btnRtApply" class="primary-btn wide" type="button">Als Tour übernehmen</button>
+        </div>
+        <div class="comp">
+          <h3>Runde mit Wunschlänge</h3>
+          <p class="hint rt-lead">Vom Start zur Route, ein Stück darauf und zurück.</p>
+          <div class="form-field">
+            <span class="num-field"><input id="rtLoopKm" type="number" inputmode="decimal" min="5" max="300" step="1" value="50"> km</span>
+            <button id="btnRtLoop" class="ghost-btn" type="button">Runde vorschlagen</button>
+          </div>
+          <p class="hint" id="rtLoopStatus" hidden></p>
+          <ul id="rtLoops" class="cand-list"></ul>
+        </div>
       </section>
 
       <section class="block" data-tab="wetter">

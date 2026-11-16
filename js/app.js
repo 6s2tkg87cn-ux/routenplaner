@@ -12,6 +12,7 @@ import { createProfileChart } from './elevation.js';
 import { generateRoundTrips, generateDetours } from './roundtrip.js';
 import { POI_CATS, POI_GROUPS, fetchPois, PoiError } from './pois.js';
 import { listOffline, planDownload, runDownload, removeDownload } from './offline.js';
+import { searchRoutes, loadRouteTrack, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
 import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
@@ -35,7 +36,7 @@ const mb = (bytes) => (bytes < 10e6 ? fmt(bytes / 1e6, 1) : fmt(bytes / 1e6)) + 
 // ---------------------------------------------------------------- Zustand
 
 const STORE_KEY = 'rueckenwind.v1';
-const TABS = { plan: 'Planen', tour: 'Tour', wetter: 'Wetter', stopps: 'Stopps', touren: 'Meine' };
+const TABS = { plan: 'Planen', routen: 'Routen', tour: 'Tour', wetter: 'Wetter', stopps: 'Stopps', touren: 'Meine' };
 const emptyWp = () => ({ id: uid(), lat: null, lon: null, label: '' });
 
 const state = {
@@ -57,6 +58,8 @@ const state = {
   chartH: { desktop: 110, mobile: 90 },
   tab: 'plan',
   panelW: 404,
+  routeTour: null, // Tour auf einer eingetragenen Route: { id, name, from, to, approach, back }
+  rtOpts: { approach: true, back: false },
   radar: false,
   waypoints: [emptyWp(), emptyWp()],
   nogos: [],
@@ -88,6 +91,8 @@ function load() {
     if (s.chartH && s.chartH.desktop > 0 && s.chartH.mobile > 0) state.chartH = s.chartH;
     if (TABS[s.tab]) state.tab = s.tab;
     if (s.panelW >= 300 && s.panelW <= 720) state.panelW = s.panelW;
+    if (s.routeTour && s.routeTour.id) state.routeTour = s.routeTour;
+    if (s.rtOpts) state.rtOpts = { ...state.rtOpts, ...s.rtOpts };
     state.radar = !!s.radar;
     if (Array.isArray(s.waypoints) && s.waypoints.length >= 2) state.waypoints = s.waypoints.map((w) => ({ ...emptyWp(), ...w, id: uid() }));
     if (Array.isArray(s.nogos)) state.nogos = s.nogos.map((n) => ({ ...n, id: uid() }));
@@ -170,7 +175,7 @@ function renderRadarInfo() {
 let map, chart, hoverMarker = null, popup = null;
 let markers = [], nogoMarkers = [];
 const EMPTY = { type: 'FeatureCollection', features: [] };
-const overlay = { route: EMPTY, cands: EMPTY, nogo: EMPTY, wind: EMPTY, sel: EMPTY };
+const overlay = { route: EMPTY, cands: EMPTY, nogo: EMPTY, wind: EMPTY, sel: EMPTY, rtrack: EMPTY, rsec: EMPTY };
 
 // Weißer Winkel, der in Fahrtrichtung zeigt (wird entlang der Route wiederholt)
 function chevronImage() {
@@ -202,7 +207,7 @@ function setLayer(key) {
 // nach jedem Stilwechsel neu angelegt.
 function addOverlays() {
   if (map.getSource('route')) return;
-  for (const k of ['nogo', 'cands', 'wind', 'route', 'sel']) map.addSource(k, { type: 'geojson', data: overlay[k] });
+  for (const k of ['nogo', 'cands', 'rtrack', 'rsec', 'wind', 'route', 'sel']) map.addSource(k, { type: 'geojson', data: overlay[k] });
   if (!map.hasImage('chevron')) map.addImage('chevron', chevronImage(), { pixelRatio: 2 });
   const round = { 'line-cap': 'round', 'line-join': 'round' };
   map.addLayer({ id: 'nogo-fill', type: 'fill', source: 'nogo', paint: { 'fill-color': '#b3261e', 'fill-opacity': 0.14 } });
@@ -210,6 +215,11 @@ function addOverlays() {
   map.addLayer({ id: 'cand-casing', type: 'line', source: 'cands', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9 } });
   map.addLayer({ id: 'cand-line', type: 'line', source: 'cands', layout: round, paint: { 'line-color': '#47595d', 'line-width': 3.5 } });
   map.addLayer({ id: 'cand-hit', type: 'line', source: 'cands', paint: { 'line-color': '#000', 'line-width': 24, 'line-opacity': 0.01 } });
+  // eingetragene Route im Reiter „Routen“ (blau) und der gewählte Abschnitt
+  map.addLayer({ id: 'rt-casing', type: 'line', source: 'rtrack', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9 } });
+  map.addLayer({ id: 'rt-line', type: 'line', source: 'rtrack', layout: round, paint: { 'line-color': '#2a78d6', 'line-width': 3.5, 'line-opacity': 0.75 } });
+  map.addLayer({ id: 'rsec-line', type: 'line', source: 'rsec', layout: round, paint: { 'line-color': '#1f5fae', 'line-width': 7 } });
+  map.addLayer({ id: 'rt-hit', type: 'line', source: 'rtrack', paint: { 'line-color': '#000', 'line-width': 24, 'line-opacity': 0.01 } });
   // Wind als farbiger Rand der Route: rot = Gegenwind, violett = Rückenwind
   map.addLayer({ id: 'wind-halo', type: 'line', source: 'wind', layout: round,
     paint: { 'line-color': ['match', ['get', 'cls'], 'head', '#d03b3b', '#6250d6'], 'line-width': 15, 'line-opacity': 0.9 } });
@@ -291,19 +301,24 @@ function initMap() {
     if (nav) return;
     toggleLayerMenu(false);
     const box = [[ev.point.x - 9, ev.point.y - 9], [ev.point.x + 9, ev.point.y + 9]];
+    if (state.tab === 'routen') {
+      const onTrack = rtSel && map.getLayer('rt-hit') && map.queryRenderedFeatures(box, { layers: ['rt-hit'] }).length;
+      return onTrack ? rtMenu(ev.lngLat.lat, ev.lngLat.lng) : rtStartMenu(ev.lngLat.lat, ev.lngLat.lng);
+    }
     const layers = ['route-hit', 'cand-hit'].filter((id) => map.getLayer(id));
     const hits = layers.length ? map.queryRenderedFeatures(box, { layers }) : [];
     const cand = hits.find((f) => f.layer.id === 'cand-hit');
     if (hits.some((f) => f.layer.id === 'route-hit')) {
-      if (state.mode === 'route') addVia(ev.lngLat.lat, ev.lngLat.lng);
+      if (state.mode === 'route' && !state.routeTour) addVia(ev.lngLat.lat, ev.lngLat.lng);
       return;
     }
     if (cand) return applyCandidate(cand.properties.i);
+    if (state.routeTour) return toast('Diese Tour folgt einer eingetragenen Route. Ändere sie im Reiter „Routen“ oder wandle sie unter „Planen“ in eine normale Route um.');
     onMapClick(ev.lngLat.lat, ev.lngLat.lng);
   }
   map.on('mousemove', 'route-hit', (ev) => {
     if (!route) return;
-    map.getCanvas().style.cursor = state.mode === 'route' ? 'copy' : '';
+    map.getCanvas().style.cursor = state.mode === 'route' && !state.routeTour ? 'copy' : '';
     const i = nearestIndex(route, ev.lngLat.lat, ev.lngLat.lng);
     setHover(route.cum[i], { lat: route.lat[i], lon: route.lon[i] });
     chart.setCursor(route.cum[i]);
@@ -421,6 +436,7 @@ function toggleFavorite(w) {
 }
 
 function renderWaypoints() {
+  renderRtInfo();
   const list = $('wpList');
   list.replaceChildren();
   state.waypoints.forEach((w, i) => {
@@ -755,6 +771,7 @@ function changed({ keepAlt = false } = {}) {
 }
 
 async function calcRoute() {
+  if (state.routeTour) return calcRouteTour();
   const pts = state.waypoints.filter((w) => w.lat != null);
   if (routeCtrl) routeCtrl.abort();
   const distinct = pts.some((p) => Math.abs(p.lat - pts[0].lat) > 1e-5 || Math.abs(p.lon - pts[0].lon) > 1e-5);
@@ -1131,6 +1148,263 @@ function initRound() {
   renderMode();
 }
 
+// ---------------------------------------------------------------- Routen (eingetragene Rad- und Wanderwege)
+
+let rtList = [], rtSel = null, rtSec = null, rtCtrl = null, rtMarkers = [], rtLoopCands = [];
+const kmText = (m) => fmt(m / 1000, m < 100000 ? 1 : 0);
+
+function initRoutes() {
+  $('btnRtSearch').addEventListener('click', runRtSearch);
+  $('btnRtBack').addEventListener('click', () => { rtSel = null; rtLoopCands = []; renderRtSel(); renderRtMap(); });
+  $('btnRtWhole').addEventListener('click', () => { if (!rtSel) return; rtSec = { from: 0, to: rtSel.track.dist }; renderRtSel(); renderRtMap(); fitTrack(); });
+  $('btnRtReverse').addEventListener('click', () => { if (!rtSec) return; rtSec = { from: rtSec.to, to: rtSec.from }; renderRtSel(); renderRtMap(); });
+  $('rtApproach').checked = state.rtOpts.approach;
+  $('rtBackSw').checked = state.rtOpts.back;
+  $('rtApproach').addEventListener('change', () => { state.rtOpts.approach = $('rtApproach').checked; save(); });
+  $('rtBackSw').addEventListener('change', () => { state.rtOpts.back = $('rtBackSw').checked; save(); });
+  $('btnRtApply').addEventListener('click', () => applyRouteTour(rtSec.from, rtSec.to, state.rtOpts.approach, state.rtOpts.back));
+  $('btnRtLoop').addEventListener('click', runRtLoops);
+  $('btnRtEdit').addEventListener('click', editRouteTour);
+  $('btnRtConvert').addEventListener('click', convertRouteTour);
+  renderRtList();
+  renderRtSel();
+}
+
+function rtStatus(text) { $('rtStatus').hidden = !text; $('rtStatus').textContent = text || ''; }
+
+async function runRtSearch() {
+  if (!online()) return toast('Die Suche nach Routen braucht Internet.', true);
+  if (map.getZoom() < 7) return rtStatus('Zoome näher heran. Bei sehr großen Ausschnitten dauert die Suche zu lange.');
+  if (rtCtrl) rtCtrl.abort();
+  const ctrl = rtCtrl = new AbortController();
+  const b = map.getBounds();
+  rtStatus('Routen werden gesucht …');
+  $('btnRtSearch').disabled = true;
+  try {
+    rtList = await searchRoutes([b.getSouth(), b.getWest(), b.getNorth(), b.getEast()], state.profile, ctrl.signal);
+    if (ctrl !== rtCtrl) return;
+    rtStatus(rtList.length ? '' : 'Hier ist keine passende Route eingetragen. Verschiebe die Karte oder zoome heraus.');
+    rtSel = null;
+    renderRtList(); renderRtSel(); renderRtMap();
+  } catch (e) {
+    if (e.name !== 'AbortError') rtStatus(e.message || 'Die Routen konnten nicht geladen werden.');
+  } finally { if (ctrl === rtCtrl) $('btnRtSearch').disabled = false; }
+}
+
+function renderRtList() {
+  const ul = $('rtList');
+  ul.replaceChildren();
+  for (const r of rtList) {
+    ul.append(h('li', {}, h('button', { type: 'button', class: 'cand', onclick: () => openRoute(r) },
+      h('span', { class: 'cand-top' }, h('span', { class: 'cand-name', text: r.name })),
+      h('span', { class: 'cand-nums' }, h('span', { text: routeLabel(r) })),
+      r.parentNames.length ? h('span', { class: 'cand-tag', text: 'Teil von ' + r.parentNames.slice(0, 2).join(' und ') }) : null)));
+  }
+}
+
+async function openRoute(item) {
+  if (rtCtrl) rtCtrl.abort();
+  const ctrl = rtCtrl = new AbortController();
+  rtStatus(`„${item.name}“ wird geladen. Lange Routen brauchen einige Sekunden …`);
+  $('busy').hidden = false;
+  try {
+    const track = await loadRouteTrack(item.id, ctrl.signal);
+    if (ctrl !== rtCtrl) return;
+    rtStatus('');
+    rtSel = { item, track };
+    rtSec = { from: 0, to: track.dist };
+    rtLoopCands = [];
+    renderRtSel(); renderRtMap(); fitTrack();
+    $('panelScroll').scrollTop = 0;
+  } catch (e) {
+    if (e.name !== 'AbortError') rtStatus(e.message || 'Die Route konnte nicht geladen werden.');
+  } finally { $('busy').hidden = true; }
+}
+
+function fitTrack() {
+  if (!rtSel) return;
+  const t = rtSel.track;
+  let w = Infinity, s2 = Infinity, e = -Infinity, n = -Infinity;
+  for (let i = 0; i < t.n; i += Math.max(1, Math.floor(t.n / 2000))) { w = Math.min(w, t.lon[i]); e = Math.max(e, t.lon[i]); s2 = Math.min(s2, t.lat[i]); n = Math.max(n, t.lat[i]); }
+  map.fitBounds([[w, s2], [e, n]], { padding: fitPadding(), duration: 700, maxZoom: 15 });
+}
+
+function renderRtSel() {
+  $('rtSearch').hidden = !!rtSel;
+  $('rtSel').hidden = !rtSel;
+  if (!rtSel) return;
+  const { item, track } = rtSel;
+  $('rtName').textContent = item.name;
+  const meta = [routeLabel({ ...item, km: 0 }) + `, ${kmText(track.dist)} km zusammenhängend eingetragen.`];
+  if (track.gaps.length) meta.push(`${track.gaps.length} Lücke${track.gaps.length > 1 ? 'n' : ''} in den Daten, überbrückt mit deinem Profil.`);
+  if (item.km && track.dist / 1000 < item.km * 0.8) meta.push(`Offiziell ${fmt(item.km)} km. Die Daten sind nicht durchgehend; gezeigt wird nur ein zusammenhängender Teil.`);
+  $('rtMeta').replaceChildren(meta.join(' ') + ' ', track.website || item.website ? h('a', { href: track.website || item.website, target: '_blank', rel: 'noopener noreferrer', text: 'Offizielle Seite' }) : '');
+  const len = Math.abs(rtSec.to - rtSec.from), whole = Math.min(rtSec.from, rtSec.to) < 1 && Math.max(rtSec.from, rtSec.to) > track.dist - 1;
+  $('rtSecText').textContent = (whole ? 'Ganze Route' : `km ${kmText(Math.min(rtSec.from, rtSec.to))} bis ${kmText(Math.max(rtSec.from, rtSec.to))}`) + `, ${kmText(len)} km` +
+    (rtSec.to < rtSec.from ? ', in Gegenrichtung' : '');
+  const st = state.waypoints[0];
+  $('rtStartNote').textContent = st && st.lat != null ? 'Start: ' + st.label.split(',')[0] : 'Kein Start gesetzt. Tippe neben die Route auf die Karte und wähle „Als Start“.';
+  renderRtLoops();
+}
+
+// Route und Abschnitt auf der Karte, nur im Reiter „Routen“
+function renderRtMap() {
+  rtMarkers.forEach((m) => m.remove());
+  rtMarkers = [];
+  const show = state.tab === 'routen' && rtSel;
+  setOverlay('rtrack', show ? { type: 'FeatureCollection', features: [lineFeature(rtSel.track)] } : EMPTY);
+  if (!show) { setOverlay('rsec', EMPTY); return; }
+  const t = rtSel.track, a = Math.min(rtSec.from, rtSec.to), b = Math.max(rtSec.from, rtSec.to);
+  setOverlay('rsec', { type: 'FeatureCollection', features: [sliceFeature(t, a, b, {})] });
+  for (const [d, text, title] of [[rtSec.from, '▶', 'Anfang des Abschnitts'], [rtSec.to, '■', 'Ende des Abschnitts']]) {
+    const p = pointAt(t, d);
+    rtMarkers.push(new maplibregl.Marker({ element: h('div', { class: 'pin pin-sec', text, title }) }).setLngLat([p.lon, p.lat]).addTo(map));
+  }
+}
+
+function rtMenu(lat, lon) {
+  const t = rtSel.track, d = projectOnRoute(t, lat, lon).d, p = pointAt(t, d);
+  const item = (text, fn) => h('button', { type: 'button', text, onclick: () => { closeMenu(); fn(); renderRtSel(); renderRtMap(); } });
+  openMenu(p.lat, p.lon, h('div', { class: 'map-menu' },
+    h('strong', { text: `km ${kmText(d)}` }),
+    item('Abschnitt beginnt hier', () => { rtSec = { from: d, to: Math.abs(rtSec.to - d) < 200 ? (d < t.dist / 2 ? t.dist : 0) : rtSec.to }; }),
+    item('Abschnitt endet hier', () => { rtSec = { from: Math.abs(rtSec.from - d) < 200 ? (d < t.dist / 2 ? t.dist : 0) : rtSec.from, to: d }; }),
+    item('Ganze Route', () => { rtSec = { from: 0, to: t.dist }; })));
+}
+
+function rtStartMenu(lat, lon) {
+  if (popup) return closeMenu();
+  openMenu(lat, lon, h('div', { class: 'map-menu' }, h('button', { type: 'button', text: 'Als Start', onclick: () => {
+    closeMenu();
+    state.waypoints[0] = { id: uid(), lat, lon, label: fmt(lat, 5) + ', ' + fmt(lon, 5) };
+    renderMarkers(); save(); renderRtSel();
+    reverseGeocode(lat, lon).then((name) => { if (name && state.waypoints[0].lat === lat) { state.waypoints[0].label = name; save(); renderRtSel(); renderWaypoints(); } });
+  } })));
+}
+
+function applyRouteTour(from, to, approach, back) {
+  if (!rtSel) return;
+  const start = state.waypoints[0];
+  state.routeTour = { id: rtSel.item.id, name: rtSel.item.name, from, to, approach: !!approach, back: !!back };
+  state.mode = 'route';
+  state.loop = false;
+  state.waypoints = [start && start.lat != null ? start : emptyWp(), emptyWp()];
+  state.tourName = '';
+  $('tourName').value = '';
+  clearCandidates();
+  fitNext = true;
+  renderMode(); renderLoop(); renderWaypoints();
+  setTab('tour');
+  changed();
+}
+
+// Tour auf einer Route berechnen: Strecke laden (wird gemerkt), Abschnitt aufbereiten, Anfahrt und Rückweg ergänzen
+async function calcRouteTour() {
+  if (routeCtrl) routeCtrl.abort();
+  if (!online()) { $('busy').hidden = true; toast('Ohne Internet lässt sich die Tour nicht berechnen. Offline-Touren findest du unter „Meine Touren“.', true); return; }
+  const ctrl = routeCtrl = new AbortController();
+  const rt = state.routeTour, start = state.waypoints[0] && state.waypoints[0].lat != null ? state.waypoints[0] : null;
+  $('busy').hidden = false;
+  toast(`Tour auf „${rt.name}“ wird berechnet …`);
+  try {
+    const track = await loadRouteTrack(rt.id, ctrl.signal);
+    const r = await buildRouteTour({ track, from: rt.from, to: rt.to, start: rt.approach ? start : null, back: rt.back,
+      profile: state.profile, options: state.options[state.profile], nogos: state.nogos, signal: ctrl.signal });
+    if (ctrl !== routeCtrl) return;
+    route = r;
+    hideToast();
+    showRoute();
+    if (r.eleMissing) toast('Die Höhen für den Routenabschnitt konnten nicht geladen werden. Höhenprofil und Fahrzeit sind dort ungenau.', true);
+    else if (r.bridged) toast(`${r.bridged} Lücke${r.bridged > 1 ? 'n' : ''} in den Routendaten mit deinem Profil überbrückt.`);
+  } catch (e) {
+    if (e.name === 'AbortError' || ctrl !== routeCtrl) return;
+    route = null;
+    showRoute();
+    toast(e instanceof RouteError ? e.message : 'Die Tour auf der Route konnte nicht berechnet werden.', true);
+    if (!(e instanceof RouteError)) console.error(e);
+  } finally { if (ctrl === routeCtrl) $('busy').hidden = true; }
+}
+
+function renderRtInfo() {
+  const rt = state.routeTour;
+  document.body.classList.toggle('route-tour', !!rt);
+  $('rtInfo').hidden = !rt;
+  if (!rt) return;
+  $('rtInfoName').textContent = rt.name;
+  const extra = [rt.approach && state.waypoints[0].lat != null ? 'mit Anfahrt' : '', rt.back ? 'zurück zum Start' : ''].filter(Boolean).join(', ');
+  $('rtInfoSub').textContent = `Abschnitt km ${fmt(Math.min(rt.from, rt.to) / 1000, 1)} bis ${fmt(Math.max(rt.from, rt.to) / 1000, 1)}` + (rt.to < rt.from ? ' in Gegenrichtung' : '') + (extra ? ', ' + extra : '');
+}
+
+async function editRouteTour() {
+  const rt = state.routeTour;
+  if (!rt) return;
+  setTab('routen');
+  try {
+    const track = await loadRouteTrack(rt.id);
+    rtSel = { item: { id: rt.id, name: rt.name, kind: '', rank: 4, km: 0, website: '', parentNames: [] }, track };
+    rtSec = { from: rt.from, to: rt.to };
+    state.rtOpts = { approach: rt.approach, back: rt.back };
+    $('rtApproach').checked = rt.approach; $('rtBackSw').checked = rt.back;
+    renderRtSel(); renderRtMap();
+  } catch (e) { toast(e.message || 'Die Route konnte nicht geladen werden.', true); }
+}
+
+// Aus der Routen-Tour eine normale, frei bearbeitbare Route machen (folgt ihr über Stützpunkte)
+function convertRouteTour() {
+  if (!state.routeTour || !route) return;
+  const pts = [];
+  for (let i = 0; i < route.n; i++) pts.push({ lat: route.lat[i], lon: route.lon[i] });
+  const a = pts[0], z = pts[pts.length - 1];
+  const closed = Math.hypot(a.lat - z.lat, (a.lon - z.lon) * Math.cos(a.lat * Math.PI / 180)) < 0.003;
+  let keep = simplifyTrack(pts, 16);
+  if (closed) keep = keep.slice(0, -1);
+  const start = state.waypoints[0];
+  state.waypoints = keep.map((q, i) => ({ id: uid(), lat: q.lat, lon: q.lon, label: i === 0 && start.lat != null ? start.label : 'Wegpunkt ' + i }));
+  while (state.waypoints.length < 2) state.waypoints.push(emptyWp());
+  state.loop = closed;
+  state.routeTour = null;
+  renderLoop(); renderWaypoints();
+  changed();
+  toast('Die Tour ist jetzt eine normale Route und folgt dem Abschnitt über Wegpunkte. Sie kann an einzelnen Stellen abweichen.');
+}
+
+async function runRtLoops() {
+  if (!rtSel) return;
+  const start = state.waypoints[0];
+  if (!start || start.lat == null) return toast('Setze zuerst einen Start: neben die Route auf die Karte tippen und „Als Start“ wählen.', true);
+  const km = parseFloat($('rtLoopKm').value);
+  if (!(km >= 5 && km <= 300)) return toast('Gib eine Länge zwischen 5 und 300 km ein.');
+  if (rtCtrl) rtCtrl.abort();
+  const ctrl = rtCtrl = new AbortController();
+  const st = $('rtLoopStatus');
+  st.hidden = false; st.textContent = 'Runden werden berechnet …';
+  rtLoopCands = []; renderRtLoops();
+  $('btnRtLoop').disabled = true;
+  try {
+    rtLoopCands = await suggestRouteLoops({ track: rtSel.track, start: { lat: start.lat, lon: start.lon }, km, profile: state.profile,
+      options: state.options[state.profile], nogos: state.nogos, signal: ctrl.signal });
+    if (ctrl !== rtCtrl) return;
+    st.hidden = true;
+    renderRtLoops();
+  } catch (e) {
+    if (e.name !== 'AbortError') st.textContent = e.message || 'Es wurde keine Runde gefunden.';
+  } finally { $('btnRtLoop').disabled = false; }
+}
+
+function renderRtLoops() {
+  const ul = $('rtLoops');
+  ul.replaceChildren();
+  for (const c of rtLoopCands) {
+    const r = c.route;
+    ul.append(h('li', {}, h('button', { type: 'button', class: 'cand', onclick: () => applyRouteTour(c.from, c.to, true, true) },
+      h('span', { class: 'cand-top' }, h('span', { class: 'cand-name', text: c.name })),
+      h('span', { class: 'cand-nums' },
+        h('span', {}, h('b', { text: fmt(r.dist / 1000, 1) }), ' km'),
+        h('span', {}, h('b', { text: fmt(r.ascent) }), ' hm'),
+        h('span', {}, h('b', { text: kmText(r.secLen) }), ' km auf der Route')))));
+  }
+}
+
 // ---------------------------------------------------------------- Abfahrt und Wetter
 
 let departDay = 0, wxCtrl = null, wxTimer = 0;
@@ -1363,7 +1637,7 @@ function navUpdate(pos) {
   if (nav.off >= 2) {
     // Neben der Route: mit Internet neu berechnen, sonst Richtung zurück zeigen
     const back = projectOnRoute(route, lat, lon);
-    if (online() && !nav.busy && Date.now() - nav.rerouteAt > 20000) navReroute(lat, lon);
+    if (online() && !state.routeTour && !nav.busy && Date.now() - nav.rerouteAt > 20000) navReroute(lat, lon);
     const r = Math.PI / 180, y = Math.sin((back.lon - lon) * r) * Math.cos(back.lat * r);
     const x = Math.cos(lat * r) * Math.sin(back.lat * r) - Math.sin(lat * r) * Math.cos(back.lat * r) * Math.cos((back.lon - lon) * r);
     return navRender({ back: { dist: back.dist, rel: Math.atan2(y, x) / r - nav.heading }, busy: nav.busy });
@@ -1466,6 +1740,7 @@ function initNav() {
 // ---------------------------------------------------------------- Export
 
 function defaultTourName() {
+  if (state.routeTour) { const rt = state.routeTour; return `${rt.name}, km ${fmt(Math.min(rt.from, rt.to) / 1000)} bis ${fmt(Math.max(rt.from, rt.to) / 1000)}`; }
   const pts = state.waypoints.filter((w) => w.lat != null);
   if (pts.length < 2 && !state.loop) return 'Tour';
   const short = (s) => s.split(',')[0];
@@ -1480,15 +1755,17 @@ function snapshot() {
     profile: state.profile, options: state.options[state.profile], loop: state.loop,
     waypoints: state.waypoints.filter((w) => w.lat != null).map((w) => ({ lat: +w.lat.toFixed(6), lon: +w.lon.toFixed(6), label: w.label })),
     nogos: state.nogos.map((n) => ({ lat: n.lat, lon: n.lon, radius: n.radius })),
+    rt: state.routeTour || undefined,
   };
 }
 
 function restore(plan, name, stored) {
-  if (!plan || !Array.isArray(plan.waypoints) || plan.waypoints.length < 1) return toast('Diese Tour lässt sich nicht laden.', true);
+  if (!plan || !Array.isArray(plan.waypoints) || (plan.waypoints.length < 1 && !plan.rt)) return toast('Diese Tour lässt sich nicht laden.', true);
   if (PROFILES[plan.profile]) { state.profile = plan.profile; state.options[plan.profile] = { ...DEFAULT_OPTIONS[plan.profile], ...plan.options }; }
   state.waypoints = plan.waypoints.map((w) => ({ id: uid(), lat: w.lat, lon: w.lon, label: w.label || fmt(w.lat, 5) + ', ' + fmt(w.lon, 5) }));
-  if (state.waypoints.length < 2) state.waypoints.push(emptyWp());
+  while (state.waypoints.length < 2) state.waypoints.push(emptyWp());
   state.loop = !!plan.loop;
+  state.routeTour = plan.rt && plan.rt.id ? plan.rt : null;
   state.nogos = (plan.nogos || []).map((n) => ({ ...n, id: uid() }));
   state.mode = 'route';
   setTab('plan');
@@ -1558,7 +1835,7 @@ async function pipe(bytes, stream) {
 async function tourLink() {
   const plan = snapshot(), def = DEFAULT_OPTIONS[plan.profile], opts = {};
   for (const k in plan.options) if (plan.options[k] !== def[k]) opts[k] = plan.options[k]; // nur Abweichungen vom Standard
-  const data = { n: state.tourName.trim() || defaultTourName(), p: plan.profile, o: opts, l: plan.loop ? 1 : 0,
+  const data = { n: state.tourName.trim() || defaultTourName(), p: plan.profile, o: opts, l: plan.loop ? 1 : 0, r: plan.rt,
     w: plan.waypoints.map((w) => [+w.lat.toFixed(5), +w.lon.toFixed(5), w.label]), g: plan.nogos.map((n) => [+n.lat.toFixed(5), +n.lon.toFixed(5), n.radius]) };
   const raw = new TextEncoder().encode(JSON.stringify(data));
   let code = 'j' + b64.enc(raw);
@@ -1573,7 +1850,7 @@ async function readTourLink() {
     let bytes = b64.dec(m[2]);
     if (m[1] === 'z') bytes = await pipe(bytes, new DecompressionStream('deflate-raw'));
     const d = JSON.parse(new TextDecoder().decode(bytes));
-    restore({ profile: d.p, options: d.o || {}, loop: !!d.l, waypoints: d.w.map((w) => ({ lat: w[0], lon: w[1], label: w[2] })),
+    restore({ profile: d.p, options: d.o || {}, loop: !!d.l, rt: d.r, waypoints: d.w.map((w) => ({ lat: w[0], lon: w[1], label: w[2] })),
       nogos: (d.g || []).map((n) => ({ lat: n[0], lon: n[1], radius: n[2] })) }, d.n || '');
     toast('Tour aus dem Link geladen.');
     return true;
@@ -1624,7 +1901,11 @@ async function prepareOffline(t) {
   try {
     const p = t.plan, pts = p.waypoints.map((w) => ({ lat: w.lat, lon: w.lon }));
     if (p.loop) pts.push(pts[0]);
-    const r = await fetchRoute({ profile: p.profile, options: { ...DEFAULT_OPTIONS[p.profile], ...p.options }, points: pts, nogos: p.nogos || [], signal: job.ctrl.signal });
+    const opts = { ...DEFAULT_OPTIONS[p.profile], ...p.options };
+    const r = p.rt
+      ? await buildRouteTour({ track: await loadRouteTrack(p.rt.id, job.ctrl.signal), from: p.rt.from, to: p.rt.to, start: p.rt.approach && p.waypoints[0] ? p.waypoints[0] : null,
+        back: p.rt.back, profile: p.profile, options: opts, nogos: p.nogos || [], signal: job.ctrl.signal })
+      : await fetchRoute({ profile: p.profile, options: opts, points: pts, nogos: p.nogos || [], signal: job.ctrl.signal });
     const dl = await planDownload(r, LAYERS.standard.style, job.ctrl.signal);
     let pois = [], poiNote = state.poiCats.length ? '' : ' Stopps sind keine gewählt.';
     if (state.poiCats.length) {
@@ -1941,6 +2222,7 @@ function initChartGrip() {
 function setTab(tab) {
   state.tab = TABS[tab] ? tab : 'plan';
   document.body.dataset.tab = state.tab;
+  if (map) renderRtMap();
   for (const b of $('tabBar').children) b.setAttribute('aria-selected', String(b.dataset.tab === state.tab));
   $('panelScroll').scrollTop = 0;
   save();
@@ -1950,6 +2232,7 @@ function initTabs() {
     onclick: () => { setTab(key); if (isMobile() && sheetMode === 'peek') setSheet('half'); } }));
   $('tabBar').setAttribute('role', 'tablist');
   setTab(state.tab);
+  initRoutes();
 }
 
 function initLegend() {
@@ -2021,6 +2304,7 @@ async function init() {
   });
   $('btnReverse').addEventListener('click', reverseRoute);
   $('btnNew').addEventListener('click', () => {
+    state.routeTour = null;
     state.waypoints = [emptyWp(), emptyWp()];
     state.nogos = [];
     state.loop = false;
