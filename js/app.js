@@ -56,6 +56,7 @@ const state = {
   detourKm: '',
   chartH: { desktop: 110, mobile: 90 },
   tab: 'plan',
+  panelW: 404,
   radar: false,
   waypoints: [emptyWp(), emptyWp()],
   nogos: [],
@@ -86,6 +87,7 @@ function load() {
     if (s.detourKm) state.detourKm = s.detourKm;
     if (s.chartH && s.chartH.desktop > 0 && s.chartH.mobile > 0) state.chartH = s.chartH;
     if (TABS[s.tab]) state.tab = s.tab;
+    if (s.panelW >= 300 && s.panelW <= 720) state.panelW = s.panelW;
     state.radar = !!s.radar;
     if (Array.isArray(s.waypoints) && s.waypoints.length >= 2) state.waypoints = s.waypoints.map((w) => ({ ...emptyWp(), ...w, id: uid() }));
     if (Array.isArray(s.nogos)) state.nogos = s.nogos.map((n) => ({ ...n, id: uid() }));
@@ -271,7 +273,17 @@ function initMap() {
     state.view = { lat: c.lat, lon: c.lng, zoom: map.getZoom() };
     save();
   });
+  // Ein einzelner Klick wird kurz zurückgehalten: Folgt ein zweiter, ist es ein Doppelklick zum Zoomen.
+  let clickTimer = 0, lastClick = 0;
+  map.on('dblclick', () => { clearTimeout(clickTimer); lastClick = 0; });
   map.on('click', (ev) => {
+    const now = Date.now(), second = now - lastClick < 280;
+    lastClick = second ? 0 : now;
+    clearTimeout(clickTimer);
+    if (second) return;
+    clickTimer = setTimeout(() => handleMapClick(ev), 280);
+  });
+  function handleMapClick(ev) {
     if (nav) return;
     toggleLayerMenu(false);
     const box = [[ev.point.x - 9, ev.point.y - 9], [ev.point.x + 9, ev.point.y + 9]];
@@ -284,7 +296,7 @@ function initMap() {
     }
     if (cand) return applyCandidate(cand.properties.i);
     onMapClick(ev.lngLat.lat, ev.lngLat.lng);
-  });
+  }
   map.on('mousemove', 'route-hit', (ev) => {
     if (!route) return;
     map.getCanvas().style.cursor = state.mode === 'route' ? 'copy' : '';
@@ -305,8 +317,7 @@ function toggleLayerMenu(open) {
 // Freie Kartenfläche neben Seitenleiste, Ergebnisleiste oder Bottom-Sheet
 function fitPadding() {
   if (isMobile()) return { top: 70, left: 40, right: 40, bottom: sheetVisible() + 30 };
-  const dockH = $('dock').hidden ? 0 : $('dock').offsetHeight;
-  return { top: 50, left: 70, right: 70, bottom: dockH + 60 };
+  return { top: 70, left: 70, right: 70, bottom: 50 };
 }
 function fitRoute(r) {
   let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
@@ -1738,6 +1749,10 @@ function drawPois(pois) {
           h('strong', { text: q.name }),
           h('span', { class: 'menu-note', text: `${q.kind || POI_CATS[q.cat].label}, bei km ${fmt(q.d / 1000, 1)}, ${fmt(Math.round(q.off / 10) * 10)} m neben der Strecke` }),
           q.hours ? h('span', { class: 'menu-note', text: q.hours }) : null,
+          h('span', { class: 'menu-links' },
+            q.web ? h('a', { href: q.web, target: '_blank', rel: 'noopener noreferrer', text: 'Webseite' }) : null,
+            h('a', { href: 'https://www.google.com/maps/search/' + encodeURIComponent(q.name) + '/@' + q.lat.toFixed(5) + ',' + q.lon.toFixed(5) + ',16z', target: '_blank', rel: 'noopener noreferrer', text: 'Bei Google Maps' }),
+            q.phone ? h('a', { href: 'tel:' + q.phone.replace(/[^+\d]/g, ''), text: q.phone }) : null),
           h('button', { type: 'button', text: 'Als Wegpunkt einfügen', onclick: () => { closeMenu(); addVia(q.lat, q.lon); } })), 14);
       });
       poiMarkers.push(new maplibregl.Marker({ element: elm }).setLngLat([q.lon, q.lat]).addTo(map));
@@ -1805,7 +1820,7 @@ function safeBottom() {
 }
 function sheetHeights() {
   const vh = window.innerHeight, full = vh - 48;
-  return { full, half: Math.round(vh * 0.5), peek: (route ? 98 : 86) + safeBottom() };
+  return { full, half: Math.round(vh * 0.5), peek: (route ? 92 : 86) + safeBottom() };
 }
 function sheetVisible() { return isMobile() ? sheetHeights()[sheetMode] : 0; }
 function applySheet(y, visible) {
@@ -1909,7 +1924,7 @@ function initChartGrip() {
     if (!drag || ev.pointerId !== drag.id) return;
     // Am Desktop sitzt der Griff über dem Profil (hochziehen = größer), am Handy darunter (runterziehen = größer)
     const dy = (ev.clientY - drag.y0) * (drag.key === 'mobile' ? 1 : -1);
-    state.chartH[drag.key] = Math.round(Math.max(60, Math.min(drag.key === 'mobile' ? 220 : 320, drag.h0 + dy)));
+    state.chartH[drag.key] = Math.round(Math.max(60, Math.min(drag.key === 'mobile' ? 220 : Math.max(120, window.innerHeight - 320), drag.h0 + dy)));
     applyChartHeight();
   });
   const end = (ev) => { if (!drag || ev.pointerId !== drag.id) return; drag = null; grip.classList.remove('active'); save(); };
@@ -1938,6 +1953,23 @@ function initLegend() {
   apply();
 }
 
+// Breite des Menüs am Computer: am rechten Rand ziehen
+function initPanelGrip() {
+  const grip = $('panelGrip'), apply = () => $('app').style.setProperty('--panel-w', state.panelW + 'px');
+  let drag = null;
+  apply();
+  grip.addEventListener('pointerdown', (ev) => { drag = { id: ev.pointerId, x0: ev.clientX, w0: state.panelW }; grip.setPointerCapture(ev.pointerId); grip.classList.add('active'); ev.preventDefault(); });
+  grip.addEventListener('pointermove', (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    state.panelW = Math.round(Math.max(300, Math.min(720, Math.min(window.innerWidth - 320, drag.w0 + ev.clientX - drag.x0))));
+    apply();
+  });
+  const end = (ev) => { if (!drag || ev.pointerId !== drag.id) return; drag = null; grip.classList.remove('active'); save(); };
+  grip.addEventListener('pointerup', end);
+  grip.addEventListener('pointercancel', end);
+  grip.addEventListener('dblclick', () => { state.panelW = 404; apply(); save(); });
+}
+
 function initFolds() {
   for (const d of document.querySelectorAll('details[data-fold]')) {
     const key = d.dataset.fold;
@@ -1953,7 +1985,12 @@ async function init() {
   initMap();
   initRound();
   initWeather();
-  chart = createProfileChart($('profileChart'), { onHover: (d, p) => setHover(d, p), onSelect: selectRange });
+  const setArmed = (on) => { $('btnRange').setAttribute('aria-pressed', String(on)); $('btnRange').textContent = on ? 'Jetzt im Profil ziehen' : 'Bereich wählen'; };
+  chart = createProfileChart($('profileChart'), { onHover: (d, p) => setHover(d, p), onSelect: selectRange, onArm: setArmed });
+  $('btnRange').addEventListener('click', () => { const on = $('btnRange').getAttribute('aria-pressed') !== 'true'; chart.arm(on); setArmed(on); });
+  // Karte passt sich an, wenn Menü oder Höhenprofil ihre Größe ändern
+  new ResizeObserver(() => map.resize()).observe($('mapArea'));
+  initPanelGrip();
   $('btnSelClear').addEventListener('click', () => { chart.clearSelection(); selectRange(null); });
   initSheet();
   initChartGrip();

@@ -26,7 +26,7 @@ function niceStep(range, target) {
 
 const fmt = (v, digits = 0) => v.toLocaleString('de-DE', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
-export function createProfileChart(host, { onHover, onSelect }) {
+export function createProfileChart(host, { onHover, onSelect, onArm }) {
   host.classList.add('chart');
   const svg = el('svg', { role: 'img', 'aria-label': 'Höhenprofil der Route' });
   const tip = document.createElement('div');
@@ -34,6 +34,7 @@ export function createProfileChart(host, { onHover, onSelect }) {
   tip.hidden = true;
   host.append(svg, tip);
 
+  let armed = false; // Bereichsauswahl nur, wenn sie vorher eingeschaltet wurde: Streichen bewegt sonst nur das Fadenkreuz
   let route = null, geom = null, wind = null, sel = null, drag = null, view = null; // view: gezoomter Ausschnitt [von, bis] in Metern
 
   function draw() {
@@ -204,6 +205,7 @@ export function createProfileChart(host, { onHover, onSelect }) {
     const d = fromEvent(ev);
     if (d == null) return;
     showAt(d, true);
+    if (!armed) return;
     drag = { id: ev.pointerId, x0: ev.clientX, d0: clamp(d), active: false };
     try { svg.setPointerCapture(ev.pointerId); } catch (e) { /* nicht kritisch */ }
   });
@@ -215,8 +217,10 @@ export function createProfileChart(host, { onHover, onSelect }) {
       const d1 = clamp(fromEvent(ev)), a = Math.min(g.d0, d1), b = Math.max(g.d0, d1);
       if (b - a < Math.max(60, geom.span * 0.02)) { paintSel(null); return; }
       sel = [a, b];
-    } else if (sel) sel = null; // einfacher Tipp hebt die Auswahl auf
-    else return;
+    } else return;
+    armed = false;
+    host.classList.remove('armed');
+    if (onArm) onArm(false);
     // Das Profil zoomt selbst auf den gewählten Bereich
     view = sel;
     tip.hidden = true;
@@ -232,6 +236,7 @@ export function createProfileChart(host, { onHover, onSelect }) {
   return {
     setRoute(r) { route = r; sel = null; view = null; drag = null; tip.hidden = true; draw(); },
     clearSelection() { sel = null; view = null; draw(); },
+    arm(on) { armed = !!on; host.classList.toggle('armed', armed); },
     setSelection(range) { sel = range; view = range; tip.hidden = true; draw(); },
     setCursor(d) { showAt(d, false); },
     setWind(bins) { wind = bins && bins.length ? bins : null; draw(); },

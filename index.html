@@ -17,6 +17,7 @@
 
   <aside id="panel" aria-label="Routenplanung">
     <button id="sheetHandle" class="sheet-handle" type="button" aria-label="Bereich vergrößern oder verkleinern"><span></span></button>
+    <div id="panelGrip" class="panel-grip" role="separator" aria-orientation="vertical" aria-label="Breite des Menüs ändern" title="Ziehen, um das Menü breiter oder schmaler zu machen"></div>
     <div id="dockSlotMobile"></div>
 
     <div class="panel-scroll" id="panelScroll">
@@ -176,6 +177,7 @@
   </aside>
 
   <main id="mapWrap">
+    <div id="mapArea">
     <div id="map" aria-label="Karte"></div>
     <div id="busy" class="busy" hidden></div>
     <div class="map-tools">
@@ -186,11 +188,13 @@
       <button id="btnLocate" class="tool-btn" type="button" title="Mein Standort">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
       </button>
-      <button id="btnNav" class="nav-start" type="button" hidden>Navigation starten</button>
     </div>
-    <div id="windBadge" class="wind-badge" hidden></div>
-    <div id="radarBadge" class="radar-badge" hidden></div>
-    <div id="offlineBadge" class="offline-badge" hidden>Offline: nur gespeicherte Touren</div>
+    <div class="map-info" id="mapInfo">
+      <button id="btnNav" class="nav-start" type="button" hidden>Navigation starten</button>
+      <div id="offlineBadge" class="info-badge offline-badge" hidden>Offline: nur gespeicherte Touren</div>
+      <div id="windBadge" class="info-badge wind-badge" hidden></div>
+      <div id="radarBadge" class="info-badge radar-badge" hidden></div>
+    </div>
     <div id="toast" class="toast" role="status" hidden></div>
     <div id="navTop" class="nav-top" hidden>
       <div id="navIcon" class="nav-icon"></div>
@@ -204,6 +208,7 @@
         <div class="stat"><dt>Ankunft</dt><dd id="navEta">–</dd></div>
       </dl>
       <button id="navStop" class="ghost-btn" type="button">Beenden</button>
+    </div>
     </div>
     <div id="dockSlotDesktop"></div>
   </main>
@@ -231,7 +236,7 @@
   </div>
   <div id="profileChart"></div>
   <button id="chartGrip" class="chart-grip" type="button" aria-label="Höhe des Höhenprofils ändern" title="Ziehen, um das Höhenprofil größer oder kleiner zu machen"><span></span></button>
-  <div class="chart-foot"><button id="btnLegend" class="link-btn" type="button" aria-expanded="false">Legende</button></div>
+  <div class="chart-foot"><button id="btnRange" class="link-btn" type="button" aria-pressed="false">Bereich wählen</button><button id="btnLegend" class="link-btn" type="button" aria-expanded="false">Legende</button></div>
   <div class="chart-legend" id="chartLegend" aria-label="Legende" hidden>
     <span class="lg-title">Steigung</span>
     <span><i class="sw slope-1"></i>3–6 %</span><span><i class="sw slope-2"></i>6–9 %</span>
