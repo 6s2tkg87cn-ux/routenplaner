@@ -186,21 +186,40 @@ function linesOf(ways) {
 export async function prefetchPreviews(ids, bbox, signal) {
   if (!ids.length) return new Map();
   const b = bbox.map((v) => v.toFixed(3)).join(',');
-  const q = `[out:json][timeout:25];rel(id:${ids.join(',')})->.t;rel(r.t)->.c;rel(r.c)->.c2;(.t;.c;.c2;)->.a;.a out body;way(r.a)(${b});out geom qt;`;
-  const json = await overpass(q, signal, 35000, 5, 3000);
-  const rels = new Map(), ways = new Map();
-  for (const e of json.elements || []) { if (e.type === 'relation') rels.set(e.id, e); else if (e.type === 'way') ways.set(e.id, e); }
+  const groups = new Map();
+  try {
+    // Je Route nur ihre Wegstücke im Ausschnitt (auch aus Unterrouten), ohne die langen Mitgliederlisten:
+    // die Antwort nennt erst die Route, dann ihre Wege.
+    const q = `[out:json][timeout:25];rel(id:${ids.join(',')})->.t;foreach.t->.x(.x out ids;rel(r.x)->.c1;rel(r.c1)->.c2;rel(r.c2)->.c3;(way(r.x)(${b});way(r.c1)(${b});way(r.c2)(${b});way(r.c3)(${b}););out geom qt;);`;
+    const json = await overpass(q, signal, 35000, 5, 3000);
+    let cur = null;
+    for (const e of json.elements || []) {
+      if (e.type === 'relation') { cur = []; groups.set(e.id, cur); } else if (e.type === 'way' && cur) cur.push(e);
+    }
+    if (!groups.size) throw new Error('leere Antwort');
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    // frühere Abfrage mit Mitgliederlisten (größer, aber bewährt)
+    groups.clear();
+    const q = `[out:json][timeout:25];rel(id:${ids.join(',')})->.t;rel(r.t)->.c;rel(r.c)->.c2;(.t;.c;.c2;)->.a;.a out body;way(r.a)(${b});out geom qt;`;
+    const json = await overpass(q, signal, 35000, 5, 3000);
+    const rels = new Map(), ways = new Map();
+    for (const e of json.elements || []) { if (e.type === 'relation') rels.set(e.id, e); else if (e.type === 'way') ways.set(e.id, e); }
+    for (const id of ids) {
+      const found = [], seen = new Set([id]);
+      const walk = (rel, depth) => {
+        for (const m of rel.members || []) {
+          if (m.type === 'way' && ways.has(m.ref)) found.push(ways.get(m.ref));
+          else if (m.type === 'relation' && rels.has(m.ref) && depth < 3 && !seen.has(m.ref)) { seen.add(m.ref); walk(rels.get(m.ref), depth + 1); }
+        }
+      };
+      if (rels.has(id)) walk(rels.get(id), 0);
+      groups.set(id, found);
+    }
+  }
   const out = new Map();
   for (const id of ids) {
-    const found = [], seen = new Set([id]);
-    const walk = (rel, depth) => {
-      for (const m of rel.members || []) {
-        if (m.type === 'way' && ways.has(m.ref)) found.push(ways.get(m.ref));
-        else if (m.type === 'relation' && rels.has(m.ref) && depth < 3 && !seen.has(m.ref)) { seen.add(m.ref); walk(rels.get(m.ref), depth + 1); }
-      }
-    };
-    if (rels.has(id)) walk(rels.get(id), 0);
-    const { fc, km } = linesOf(found);
+    const { fc, km } = linesOf(groups.get(id) || []);
     prefetched.set(id, fc);
     out.set(id, km);
   }

@@ -1313,23 +1313,26 @@ async function ensurePreviews() {
   const note = (text) => { if (mine() && !rtSel && !rtLoading && (!$('rtStatus').textContent || $('rtStatus').dataset.lines)) { rtStatus(text); $('rtStatus').dataset.lines = text ? '1' : ''; } };
   rtPreBusy = true; rtPreAgain = false;
   try {
-    const ids = rtVisible().filter((r) => !hasPreview(r.id)).slice(0, 60).map((r) => r.id);
-    if (ids.length) {
+    // bis zu drei Portionen, die wichtigsten Routen zuerst; die Linien erscheinen nach jeder Portion
+    let got = false;
+    for (let part = 0; part < 3; part++) {
+      const ids = rtVisible().filter((r) => !hasPreview(r.id)).slice(0, 60).map((r) => r.id);
+      if (!ids.length) break;
       note('Linien für die Karte werden geladen …');
-      await pause(700);
+      await pause(part ? 1200 : 400);
       try {
         const km = await prefetchPreviews(ids, bbox, ctrl.signal);
         if (!mine()) return;
         for (const r of rtList) if (km.has(r.id)) r.visKm = km.get(r.id);
-        rtList.sort(byImportance);
-        note('');
-        if (!rtSel && !rtLoading) renderRtList();
+        got = true;
+        renderRtAll();
       } catch (e) {
         if (!mine()) return;
-        note('Die Linien für die Karte konnten nicht geladen werden. ' + (e.message || '') + ' Die Liste funktioniert trotzdem.');
-        return;
+        if (!got) { note('Die Linien für die Karte konnten nicht geladen werden. ' + (e.message || '') + ' Die Liste funktioniert trotzdem.'); return; }
+        break;
       }
     }
+    if (got) { rtList.sort(byImportance); note(''); if (!rtSel && !rtLoading) renderRtList(); }
     if (state.rtMaxKm && !rtLenReady) {
       const need = rtList.filter((r) => !r.km).slice(0, 150).map((r) => r.id);
       await pause(700);
@@ -1349,9 +1352,7 @@ function renderRtAll() {
   const show = state.tab === 'routen' && !rtSel && !rtLoading;
   const features = [];
   if (show) {
-    const list = rtVisible(), ids = new Set(list.map((r) => r.id));
-    for (const r of list) {
-      if (r.parents.some((p) => ids.has(p))) continue; // Teilabschnitte stecken schon in der übergeordneten Route
+    for (const r of rtVisible()) {
       const fc = cachedPreview(r.id);
       if (fc) features.push({ type: 'Feature', properties: { id: r.id }, geometry: fc.features[0].geometry });
     }
