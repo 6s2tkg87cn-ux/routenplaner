@@ -12,7 +12,7 @@ import { createProfileChart } from './elevation.js';
 import { generateRoundTrips, generateDetours } from './roundtrip.js';
 import { POI_CATS, POI_GROUPS, fetchPois, PoiError } from './pois.js';
 import { listOffline, planDownload, runDownload, removeDownload } from './offline.js';
-import { searchRoutes, loadRouteTrack, sliceTrack, previewRoute, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
+import { searchRoutes, searchRoutesQuick, loadRouteTrack, sliceTrack, previewRoute, cachedPreview, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
 import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
@@ -635,19 +635,23 @@ function startWatch(center) {
   }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
 }
 
+// Eigene Position einmal bestimmen (eine frische Ortung wird wiederverwendet) und an "use" übergeben
+function myPosition(use) {
+  if (!navigator.geolocation) return toast('Dieser Browser kann den Standort nicht bestimmen.');
+  const done = (lat, lon) => { hideToast(); use(lat, lon); startWatch(false); };
+  if (lastPos && Date.now() - lastPos.at < 30000) return done(lastPos.lat, lastPos.lon);
+  toast('Standort wird bestimmt …');
+  navigator.geolocation.getCurrentPosition((pos) => { showMe(pos); done(pos.coords.latitude, pos.coords.longitude); },
+    () => toast('Der Standort ist nicht verfügbar. Erlaube den Zugriff in den Einstellungen des Browsers.'), { enableHighAccuracy: true, timeout: 12000 });
+}
+
 function locate(index) {
   if (index == null) return startWatch(true);
-  if (!navigator.geolocation) return toast('Dieser Browser kann den Standort nicht bestimmen.');
-  const use = (lat, lon) => {
-    hideToast();
+  myPosition((lat, lon) => {
     if (state.mode === 'round' || state.waypoints.filter((w) => w.lat != null).length === 0) map.easeTo({ center: [lon, lat], zoom: Math.max(map.getZoom(), 13) });
     else fitNext = true;
     setWaypoint(index, lat, lon, null);
-  };
-  if (lastPos && Date.now() - lastPos.at < 30000) { use(lastPos.lat, lastPos.lon); startWatch(false); return; }
-  toast('Standort wird bestimmt …');
-  navigator.geolocation.getCurrentPosition((pos) => { showMe(pos); use(pos.coords.latitude, pos.coords.longitude); startWatch(false); },
-    () => toast('Der Standort ist nicht verfügbar. Erlaube den Zugriff in den Einstellungen des Browsers.'), { enableHighAccuracy: true, timeout: 12000 });
+  });
 }
 
 // ---------------------------------------------------------------- Sperrzonen
@@ -1156,6 +1160,12 @@ function initRound() {
 // ---------------------------------------------------------------- Routen (eingetragene Rad- und Wanderwege)
 
 let rtList = [], rtSel = null, rtSec = null, rtCtrl = null, rtMarkers = [], rtLoopCands = [];
+let rtLoading = null;   // Route, deren Strecke gerade geladen wird (Ansicht ist schon offen)
+let rtMode = 'whole';   // whole: ganze Route, part: Abschnitt, loop: Runde mit Wunschlänge
+let rtSearchCtrl = null, rtSearched = false;
+
+const hasStart = () => !!state.waypoints[0] && state.waypoints[0].lat != null;
+const rtWhole = () => !!rtSel && Math.abs(rtSec.to - rtSec.from) > rtSel.track.dist - 50;
 
 // Beschreibung eines Abschnitts; bei Rundwegen kann er über das Ende der Eintragung hinweglaufen
 function secDescription(from, to, dist, closed) {
@@ -1172,19 +1182,46 @@ function initRoutes() {
   $('btnRtSearch').addEventListener('click', runRtSearch);
   $('rtRoundOnly').checked = state.rtRoundOnly;
   $('rtRoundOnly').addEventListener('change', () => { state.rtRoundOnly = $('rtRoundOnly').checked; save(); renderRtList(); });
-  $('btnRtBack').addEventListener('click', () => { rtSel = null; rtLoopCands = []; renderRtSel(); renderRtMap(); });
-  $('btnRtWhole').addEventListener('click', () => { if (!rtSel) return; rtSec = { from: 0, to: rtSel.track.dist }; renderRtSel(); renderRtMap(); fitTrack(); });
+  $('btnRtBack').addEventListener('click', () => {
+    if (rtCtrl) rtCtrl.abort();
+    rtCtrl = null; rtSel = null; rtLoading = null; rtLoopCands = [];
+    $('busy').hidden = true;
+    setOverlay('rtprev', EMPTY);
+    renderRtSel(); renderRtMap();
+  });
   $('btnRtReverse').addEventListener('click', () => { if (!rtSec) return; rtSec = { from: rtSec.to, to: rtSec.from }; renderRtSel(); renderRtMap(); });
   $('rtApproach').checked = state.rtOpts.approach;
   $('rtBackSw').checked = state.rtOpts.back;
-  $('rtApproach').addEventListener('change', () => { state.rtOpts.approach = $('rtApproach').checked; save(); });
+  $('rtApproach').addEventListener('change', () => { state.rtOpts.approach = $('rtApproach').checked; save(); renderRtSel(); });
   $('rtBackSw').addEventListener('change', () => { state.rtOpts.back = $('rtBackSw').checked; save(); });
-  $('btnRtApply').addEventListener('click', () => applyRouteTour(rtSec.from, rtSec.to, state.rtOpts.approach, state.rtOpts.back));
+  $('btnRtApply').addEventListener('click', () => applyRouteTour(rtSec.from, rtSec.to, state.rtOpts.approach && hasStart(), state.rtOpts.back));
   $('btnRtLoop').addEventListener('click', runRtLoops);
   $('btnRtEdit').addEventListener('click', editRouteTour);
   $('btnRtConvert').addEventListener('click', convertRouteTour);
+  attachAutocomplete($('rtStart'), $('rtStartAc'), {
+    pick: (lat, lon, label) => setRtStart(lat, lon, label),
+    locate: () => myPosition((lat, lon) => setRtStart(lat, lon, null)),
+    label: () => (hasStart() ? state.waypoints[0].label : ''),
+    isSet: hasStart,
+  });
+  const km = $('rtLoopKm');
+  km.addEventListener('change', () => { const v = parseFloat(km.value); if (v >= 2 && v <= 300) { state.round.km = v; $('roundKm').value = v; save(); renderRoundChips(); } renderRtLoopKm(); });
   renderRtList();
   renderRtSel();
+}
+
+// Der Start gilt für die ganze App. Hier gesetzt, wird eine bestehende Tour damit neu berechnet.
+function setRtStart(lat, lon, label) {
+  rtLoopCands = [];
+  setWaypoint(0, lat, lon, label).then(renderRtSel);
+  renderRtSel();
+}
+
+// Wunschlänge der Runde: derselbe Wert wie bei der Rundtour im Reiter „Planen“
+function renderRtLoopKm() {
+  $('rtLoopKm').value = state.round.km;
+  $('rtLoopChips').replaceChildren(...(PROFILES[state.profile].foot ? [5, 10, 15, 20] : [30, 50, 80, 100]).map((v) => h('button', { type: 'button', class: 'chip',
+    'aria-pressed': String(state.round.km === v), text: v + ' km', onclick: () => { state.round.km = v; $('roundKm').value = v; save(); renderRoundChips(); renderRtLoopKm(); } })));
 }
 
 function rtStatus(text) { $('rtStatus').hidden = !text; $('rtStatus').textContent = text || ''; }
@@ -1192,29 +1229,51 @@ function rtStatus(text) { $('rtStatus').hidden = !text; $('rtStatus').textConten
 async function runRtSearch() {
   if (!online()) return toast('Die Suche nach Routen braucht Internet.', true);
   if (map.getZoom() < 7) return rtStatus('Zoome näher heran. Bei sehr großen Ausschnitten dauert die Suche zu lange.');
-  if (rtCtrl) rtCtrl.abort();
-  const ctrl = rtCtrl = new AbortController();
-  const b = map.getBounds();
+  if (rtSearchCtrl) rtSearchCtrl.abort();
+  const ctrl = rtSearchCtrl = new AbortController();
+  const b = map.getBounds(), bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()];
+  rtSearched = true;
+  rtList = [];
+  rtOpen = {};
+  renderRtList();
   rtStatus('Routen werden gesucht …');
   $('btnRtSearch').disabled = true;
+  let full = false, failed = false;
+  // Schnelle erste Liste; die vollständige (mit Längen, Teilabschnitten und Rundwegen) ersetzt sie, sobald sie da ist
+  searchRoutesQuick(bbox, ctrl.signal).then((quick) => {
+    if (ctrl !== rtSearchCtrl || full || !quick.length) return;
+    rtList = quick;
+    rtStatus(failed ? '' : 'Erste Treffer. Die Liste wird noch vervollständigt …');
+    if (!rtSel && !rtLoading) renderRtList();
+  }).catch(() => { /* dann nur die vollständige Liste */ });
   try {
-    rtList = await searchRoutes([b.getSouth(), b.getWest(), b.getNorth(), b.getEast()], state.profile, ctrl.signal);
-    if (ctrl !== rtCtrl) return;
+    const list = await searchRoutes(bbox, ctrl.signal);
+    if (ctrl !== rtSearchCtrl) return;
+    full = true;
+    rtList = list;
     rtStatus(rtList.length ? '' : 'Hier ist keine Route eingetragen. Verschiebe die Karte oder zoome heraus.');
-    rtSel = null;
-    rtOpen = {};
-    renderRtList(); renderRtSel(); renderRtMap();
-    // Vorschau aller Routen im Hintergrund laden; danach nach Länge im Ausschnitt sortieren
-    const bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()];
-    prefetchPreviews(rtList.map((r) => r.id), bbox, ctrl.signal).then((km) => {
-      if (ctrl !== rtCtrl) return;
-      for (const r of rtList) if (km.has(r.id)) r.visKm = km.get(r.id);
-      rtList.sort(byImportance);
-      renderRtList();
-    }).catch(() => { /* Vorschau lädt dann beim Überfahren einzeln */ });
+    renderRtList();
   } catch (e) {
-    if (e.name !== 'AbortError') rtStatus(e.message || 'Die Routen konnten nicht geladen werden.');
-  } finally { if (ctrl === rtCtrl) $('btnRtSearch').disabled = false; }
+    if (e.name === 'AbortError' || ctrl !== rtSearchCtrl) return;
+    failed = true;
+    // Die schnelle Liste reicht zum Weitermachen (kommt sie erst noch, ersetzt sie die Meldung); nur ohne sie ist es ein Fehler
+    rtStatus(rtList.length ? '' : (e.message || 'Die Routen konnten nicht geladen werden.'));
+  } finally { if (ctrl === rtSearchCtrl) $('btnRtSearch').disabled = false; }
+  if (ctrl === rtSearchCtrl && full && rtList.length) prefetchList(bbox, ctrl);
+}
+
+// Vorschau der wichtigsten Routen im Hintergrund laden (in Portionen, die wichtigsten zuerst);
+// am Ende einmal nach Länge im Ausschnitt sortieren
+async function prefetchList(bbox, ctrl) {
+  const ids = rtList.slice(0, 120).map((r) => r.id), km = new Map();
+  for (let i = 0; i < ids.length; i += 40) {
+    try { for (const [id, v] of await prefetchPreviews(ids.slice(i, i + 40), bbox, ctrl.signal)) km.set(id, v); } catch (e) { break; /* Vorschau lädt dann beim Überfahren einzeln */ }
+    if (ctrl !== rtSearchCtrl) return;
+  }
+  if (!km.size) return;
+  for (const r of rtList) if (km.has(r.id)) r.visKm = km.get(r.id);
+  rtList.sort(byImportance);
+  if (!rtSel && !rtLoading) renderRtList();
 }
 
 let rtOpen = {}; // vom Nutzer auf- oder zugeklappte Gruppen bleiben so, auch wenn die Liste neu sortiert wird
@@ -1286,25 +1345,40 @@ function cancelPreview() {
   setOverlay('rtprev', EMPTY);
 }
 
-async function openRoute(item) {
+// Route öffnen: Die Ansicht erscheint sofort, die Strecke folgt. "preset" stellt einen gespeicherten Abschnitt wieder her.
+async function openRoute(item, preset) {
   cancelPreview();
   if (rtCtrl) rtCtrl.abort();
   const ctrl = rtCtrl = new AbortController();
-  rtStatus(`„${item.name}“ wird geladen. Lange Routen brauchen einige Sekunden …`);
+  rtSel = null; rtLoading = item; rtLoopCands = [];
+  $('rtLoopStatus').hidden = true;
+  rtStatus('');
+  renderRtSel(); renderRtMap();
+  $('panelScroll').scrollTop = 0;
+  const fc = cachedPreview(item.id);
+  if (fc) setOverlay('rtprev', fc);
   $('busy').hidden = false;
   try {
     const track = await loadRouteTrack(item.id, ctrl.signal);
     if (ctrl !== rtCtrl) return;
-    rtStatus('');
+    rtLoading = null;
     rtSel = { item, track };
-    rtSec = { from: 0, to: track.dist };
-    rtLoopCands = [];
-    if (track.closed) { state.rtOpts = { approach: true, back: true }; $('rtApproach').checked = true; $('rtBackSw').checked = true; save(); }
-    renderRtSel(); renderRtMap(); fitTrack();
-    $('panelScroll').scrollTop = 0;
+    rtSec = preset ? { from: preset.from, to: preset.to } : { from: 0, to: track.dist };
+    rtMode = rtWhole() ? 'whole' : 'part';
+    if (preset) state.rtOpts = { approach: !!preset.approach, back: !!preset.back };
+    else if (track.closed) state.rtOpts = { approach: true, back: true };
+    $('rtApproach').checked = state.rtOpts.approach; $('rtBackSw').checked = state.rtOpts.back;
+    save();
+    setOverlay('rtprev', EMPTY);
+    renderRtSel(); renderRtMap();
+    if (!preset) fitTrack();
   } catch (e) {
-    if (e.name !== 'AbortError') rtStatus(e.message || 'Die Route konnte nicht geladen werden.');
-  } finally { $('busy').hidden = true; }
+    if (e.name === 'AbortError' || ctrl !== rtCtrl) return;
+    rtLoading = null;
+    setOverlay('rtprev', EMPTY);
+    renderRtSel();
+    rtStatus(e.message || 'Die Route konnte nicht geladen werden.');
+  } finally { if (ctrl === rtCtrl) $('busy').hidden = true; }
 }
 
 function fitTrack() {
@@ -1315,20 +1389,48 @@ function fitTrack() {
   map.fitBounds([[w, s2], [e, n]], { padding: fitPadding(), duration: 700, maxZoom: 15 });
 }
 
-function renderRtSel() {
-  $('rtSearch').hidden = !!rtSel;
-  $('rtSel').hidden = !rtSel;
+function setRtMode(mode) {
   if (!rtSel) return;
-  const { item, track } = rtSel;
+  rtMode = mode;
+  if (mode === 'whole') { rtSec = { from: 0, to: rtSel.track.dist }; fitTrack(); }
+  renderRtSel(); renderRtMap();
+}
+
+function renderRtSel() {
+  const item = rtSel ? rtSel.item : rtLoading;
+  $('rtSearch').hidden = !!item;
+  $('rtSel').hidden = !item;
+  if (!item) return;
   $('rtName').textContent = item.name;
+  $('rtBody').hidden = !rtSel;
+  if (!rtSel) { $('rtMeta').textContent = 'Die Strecke wird geladen. Lange Routen brauchen einige Sekunden …'; return; }
+  const { track } = rtSel, foot = !!PROFILES[state.profile].foot;
   const meta = [routeLabel({ ...item, km: 0 }) + (track.closed ? ', Rundweg' : '') + `, ${kmText(track.dist)} km zusammenhängend eingetragen.`];
   if (track.gaps.length) meta.push(`${track.gaps.length} Lücke${track.gaps.length > 1 ? 'n' : ''} in den Daten, überbrückt mit deinem Profil.`);
   if (item.km && track.dist / 1000 < item.km * 0.8) meta.push(`Offiziell ${fmt(item.km)} km. Die Daten sind nicht durchgehend; gezeigt wird nur ein zusammenhängender Teil.`);
   $('rtMeta').replaceChildren(meta.join(' ') + ' ', track.website || item.website ? h('a', { href: track.website || item.website, target: '_blank', rel: 'noopener noreferrer', text: 'Offizielle Seite' }) : '');
-  const whole = Math.abs(rtSec.to - rtSec.from) > track.dist - 50, st = state.waypoints[0];
-  $('rtSecText').textContent = secDescription(rtSec.from, rtSec.to, track.dist, track.closed) +
-    (track.closed && whole && st && st.lat != null ? '. Einstieg dort, wo die Runde deinem Start am nächsten ist.' : '');
-  $('rtStartNote').textContent = st && st.lat != null ? 'Start: ' + st.label.split(',')[0] : 'Kein Start gesetzt. Tippe neben die Route auf die Karte und wähle „Als Start“.';
+  if (document.activeElement !== $('rtStart')) $('rtStart').value = hasStart() ? state.waypoints[0].label : '';
+
+  // Was soll gefahren werden? Eine Runde mit Wunschlänge gibt es nur auf Strecken, nicht auf Rundwegen.
+  if (track.closed && rtMode === 'loop') rtMode = 'whole';
+  const modes = track.closed ? [['whole', 'Ganze Runde'], ['part', 'Abschnitt']] : [['whole', 'Ganze Route'], ['part', 'Abschnitt'], ['loop', 'Runde']];
+  $('rtModeSeg').replaceChildren(...modes.map(([m, label]) => h('button', { type: 'button', role: 'radio', 'aria-checked': String(rtMode === m), text: label, onclick: () => setRtMode(m) })));
+  $('rtPart').hidden = rtMode === 'loop';
+  $('rtLoopBox').hidden = rtMode !== 'loop';
+  const whole = rtWhole(), start = hasStart(), unset = rtMode === 'part' && whole, approach = state.rtOpts.approach && start;
+  $('rtSecText').textContent = unset ? 'Noch kein Abschnitt gewählt.'
+    : secDescription(rtSec.from, rtSec.to, track.dist, track.closed) + (track.closed && whole && approach ? '. Einstieg dort, wo die Runde deinem Start am nächsten ist.' : '');
+  $('rtPartHint').hidden = rtMode !== 'part';
+  $('rtApproach').disabled = !start;
+  $('rtStartNote').textContent = start ? 'Von ' + state.waypoints[0].label.split(',')[0] + ' zum Anfang.' : 'Dafür oben einen Start setzen.';
+  // Ganze Runde ohne Anfahrt endet ohnehin, wo sie beginnt
+  $('rtBackRow').hidden = track.closed && whole && !approach;
+  $('rtBackLabel').textContent = approach ? 'Zurück zum Start' : 'Zurück zum Anfang';
+  $('btnRtApply').disabled = unset;
+  $('btnRtReverse').hidden = unset;
+  $('rtLoopLead').textContent = start ? `Von ${state.waypoints[0].label.split(',')[0]} zur Route, ein Stück darauf und auf anderem Weg zurück.`
+    : (foot ? 'Setze oben einen Start. Die Runde führt von dort zur Route, ein Stück darauf und zurück.' : 'Setze oben einen Start. Die Runde führt von dort zur Route, ein Stück darauf und auf anderem Weg zurück.');
+  renderRtLoopKm();
   renderRtLoops();
 }
 
@@ -1342,7 +1444,7 @@ function renderRtMap() {
   const t = rtSel.track, sl = sliceTrack(t, rtSec.from, rtSec.to);
   setOverlay('rsec', { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: sl.pts.map((q) => [q.lon, q.lat]) } }] });
   const whole = Math.abs(rtSec.to - rtSec.from) > t.dist - 50;
-  if (t.closed && whole) return; // Einstieg ergibt sich erst aus dem Start
+  if ((t.closed && whole) || rtMode === 'loop') return; // Einstieg ergibt sich erst aus dem Start; bei der Runde aus dem Vorschlag
   for (const [p, text, title] of [[sl.pts[0], '▶', 'Anfang des Abschnitts'], [sl.pts[sl.pts.length - 1], '■', 'Ende des Abschnitts']]) {
     rtMarkers.push(new maplibregl.Marker({ element: h('div', { class: 'pin pin-sec', text, title }) }).setLngLat([p.lon, p.lat]).addTo(map));
   }
@@ -1351,21 +1453,17 @@ function renderRtMap() {
 function rtMenu(lat, lon) {
   const t = rtSel.track, d = projectOnRoute(t, lat, lon).d, p = pointAt(t, d);
   const item = (text, fn) => h('button', { type: 'button', text, onclick: () => { closeMenu(); fn(); renderRtSel(); renderRtMap(); } });
+  const far = d < t.dist / 2 ? t.dist : 0; // fällt das andere Ende auf denselben Punkt, gilt das entferntere Routenende
   openMenu(p.lat, p.lon, h('div', { class: 'map-menu' },
     h('strong', { text: `km ${kmText(d)}` }),
-    item('Abschnitt beginnt hier', () => { rtSec = { from: d, to: Math.abs(rtSec.to - d) < 200 ? (d < t.dist / 2 ? t.dist : 0) : rtSec.to }; }),
-    item('Abschnitt endet hier', () => { rtSec = { from: Math.abs(rtSec.from - d) < 200 ? (d < t.dist / 2 ? t.dist : 0) : rtSec.from, to: d }; }),
-    item('Ganze Route', () => { rtSec = { from: 0, to: t.dist }; })));
+    item('Abschnitt beginnt hier', () => { rtMode = 'part'; rtSec = { from: d, to: Math.abs(rtSec.to - d) < 200 ? far : rtSec.to }; }),
+    item('Abschnitt endet hier', () => { rtMode = 'part'; rtSec = { from: Math.abs(rtSec.from - d) < 200 ? far : rtSec.from, to: d }; }),
+    item(t.closed ? 'Ganze Runde' : 'Ganze Route', () => { rtMode = 'whole'; rtSec = { from: 0, to: t.dist }; })));
 }
 
 function rtStartMenu(lat, lon) {
   if (popup) return closeMenu();
-  openMenu(lat, lon, h('div', { class: 'map-menu' }, h('button', { type: 'button', text: 'Als Start', onclick: () => {
-    closeMenu();
-    state.waypoints[0] = { id: uid(), lat, lon, label: fmt(lat, 5) + ', ' + fmt(lon, 5) };
-    renderMarkers(); save(); renderRtSel();
-    reverseGeocode(lat, lon).then((name) => { if (name && state.waypoints[0].lat === lat) { state.waypoints[0].label = name; save(); renderRtSel(); renderWaypoints(); } });
-  } })));
+  openMenu(lat, lon, h('div', { class: 'map-menu' }, h('button', { type: 'button', text: 'Als Start', onclick: () => { closeMenu(); setRtStart(lat, lon, null); } })));
 }
 
 function applyRouteTour(from, to, approach, back) {
@@ -1423,18 +1521,11 @@ function renderRtInfo() {
   $('rtInfoSub').textContent = secDescription(rt.from, rt.to, rt.dist || dist, !!rt.closed) + (route && route.entry != null ? ', Einstieg nahe deinem Start' : '') + (extra ? ', ' + extra : '');
 }
 
-async function editRouteTour() {
+function editRouteTour() {
   const rt = state.routeTour;
   if (!rt) return;
   setTab('routen');
-  try {
-    const track = await loadRouteTrack(rt.id);
-    rtSel = { item: { id: rt.id, name: rt.name, kind: '', rank: 4, km: 0, website: '', parentNames: [] }, track };
-    rtSec = { from: rt.from, to: rt.to };
-    state.rtOpts = { approach: rt.approach, back: rt.back };
-    $('rtApproach').checked = rt.approach; $('rtBackSw').checked = rt.back;
-    renderRtSel(); renderRtMap();
-  } catch (e) { toast(e.message || 'Die Route konnte nicht geladen werden.', true); }
+  openRoute({ id: rt.id, name: rt.name, kind: '', rank: 4, km: 0, website: '', parentNames: [] }, rt);
 }
 
 // Aus der Routen-Tour eine normale, frei bearbeitbare Route machen (folgt ihr über Stützpunkte)
@@ -1459,9 +1550,9 @@ function convertRouteTour() {
 async function runRtLoops() {
   if (!rtSel) return;
   const start = state.waypoints[0];
-  if (!start || start.lat == null) return toast('Setze zuerst einen Start: neben die Route auf die Karte tippen und „Als Start“ wählen.', true);
+  if (!start || start.lat == null) { toast('Setze zuerst einen Start: Ort suchen oder neben die Route auf die Karte tippen.'); $('rtStart').focus(); return; }
   const km = parseFloat($('rtLoopKm').value);
-  if (!(km >= 5 && km <= 300)) return toast('Gib eine Länge zwischen 5 und 300 km ein.');
+  if (!(km >= 2 && km <= 300)) return toast('Gib eine Länge zwischen 2 und 300 km ein.');
   if (rtCtrl) rtCtrl.abort();
   const ctrl = rtCtrl = new AbortController();
   const st = $('rtLoopStatus');
@@ -2314,6 +2405,8 @@ function setTab(tab) {
   for (const b of $('tabBar').children) b.setAttribute('aria-selected', String(b.dataset.tab === state.tab));
   $('panelScroll').scrollTop = 0;
   save();
+  // Routen: beim ersten Öffnen gleich im Kartenausschnitt suchen
+  if (state.tab === 'routen' && map && !rtSearched && !rtSel && !rtLoading && online() && map.getZoom() >= 9) runRtSearch();
 }
 function initTabs() {
   for (const key in TABS) $('tabBar').append(h('button', { type: 'button', role: 'tab', 'data-tab': key, text: TABS[key],

@@ -31,7 +31,7 @@ Web-App zum Planen von Radtouren mit Rennrad, Gravelbike oder Alltagsrad. Läuft
 | Karten | [OpenFreeMap](https://openfreemap.org) (Standard), [CyclOSM](https://www.cyclosm.org), [OpenTopoMap](https://opentopomap.org), TopPlusOpen (BKG), basemap.at, Esri (Satellit); Routen-Überlagerung von [Waymarked Trails](https://waymarkedtrails.org) |
 | Wetter | [Open-Meteo](https://open-meteo.com) |
 | Höhen für eingetragene Routen | [Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) (Mapzen, AWS), Ersatz: Open-Meteo |
-| Stopps, Routen | [Overpass API](https://overpass-api.de) |
+| Stopps, Routen | [Overpass API](https://overpass-api.de); schnelle erste Routenliste von [Waymarked Trails](https://waymarkedtrails.org) |
 | Regenradar | [RainViewer](https://www.rainviewer.com) |
 | Suche | [Photon](https://photon.komoot.io) |
 | Kartendaten | © [OpenStreetMap](https://www.openstreetmap.org/copyright)-Mitwirkende |

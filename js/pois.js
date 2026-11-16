@@ -86,7 +86,7 @@ export async function overpass(query, signal, timeoutMs = 35000, maxServers = SE
   } catch (e) {
     if (signal && signal.aborted) { const err = new Error('abgebrochen'); err.name = 'AbortError'; throw err; }
     // Kurzer Grund je Server, damit sich die Ursache eingrenzen lässt
-    throw new PoiError((busy ? 'Die Server für die Stopps sind gerade ausgelastet.' : 'Keiner der Server für die Stopps hat geantwortet.') +
+    throw new PoiError((busy ? 'Die Server für die Kartendaten sind gerade ausgelastet. Versuche es gleich noch einmal.' : 'Keiner der Server für die Kartendaten hat geantwortet.') +
       ' (' + why.join('; ').slice(0, 200) + ')');
   } finally {
     clearTimeout(timer);

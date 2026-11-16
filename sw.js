@@ -1,6 +1,6 @@
 // Service Worker: hält die App-Dateien vor, damit sie schnell startet und sich installieren lässt.
 // Karten, Routing, Suche und Wetter kommen immer live aus dem Netz.
-const CACHE = 'rueckenwind-v27';
+const CACHE = 'rueckenwind-v28';
 const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/routing.js', 'js/elevation.js', 'js/roundtrip.js', 'js/weather.js', 'js/pois.js', 'js/offline.js', 'js/routes.js',
   'vendor/maplibre/maplibre-gl.js', 'vendor/maplibre/maplibre-gl.css',
   'profiles/rennrad.brf', 'profiles/gravel.brf', 'profiles/alltag.brf', 'profiles/wandern.brf',
@@ -12,8 +12,8 @@ self.addEventListener('install', (ev) => {
   ev.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', (ev) => {
-  // alte App-Versionen entfernen, Offline-Touren (rw-off-…) behalten
-  ev.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE && !k.startsWith('rw-off-')).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
+  // alte App-Versionen entfernen; Offline-Touren (rw-off-…) und geladene Routen (rw-tracks) behalten
+  ev.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE && k !== 'rw-tracks' && !k.startsWith('rw-off-')).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
 });
 // Kartenteile der Standardkarte: gespeicherte Offline-Teile zuerst, sonst Netz.
 // Versionsnummer im Pfad wird ignoriert (gleiche Regel wie in js/offline.js).

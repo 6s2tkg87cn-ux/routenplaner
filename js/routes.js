@@ -14,35 +14,64 @@ export function routeLabel(r) {
 }
 
 // Wichtigkeit: erst die Einstufung (international vor lokal), dann die Länge im Kartenausschnitt (sobald bekannt),
-// sonst die Gesamtlänge (eingetragen oder geschätzt aus der Zahl der Wegstücke), zuletzt der Name.
+// sonst die eingetragene Gesamtlänge, zuletzt der Name.
 export function byImportance(a, c) {
-  return a.rank - c.rank || (c.visKm ?? -1) - (a.visKm ?? -1) || (c.km || c.size * 0.4) - (a.km || a.size * 0.4) || a.name.localeCompare(c.name, 'de');
+  return a.rank - c.rank || (c.visKm ?? -1) - (a.visKm ?? -1) || (c.km || 0) - (a.km || 0) || a.name.localeCompare(c.name, 'de');
 }
 
-/** Routen im Kartenausschnitt [Süd, West, Nord, Ost]: Rad-, MTB- und Wanderrouten. Übergeordnete Routen werden mitgeliefert. */
-export async function searchRoutes(bbox, profile, signal) {
+// Rundweg: ausdrücklich so eingetragen, oder der Name sagt es
+const looksRound = (name) => /rund(weg|wanderweg|tour|kurs|e\b)|runde\b|\bloop\b/i.test(name || '');
+
+/**
+ * Routen im Kartenausschnitt [Süd, West, Nord, Ost]: Rad-, MTB- und Wanderrouten. Übergeordnete Routen werden mitgeliefert.
+ * Von den Routen selbst kommen nur die Angaben (ohne Wegelisten), das hält die Antwort klein.
+ */
+export async function searchRoutes(bbox, signal) {
   const kinds = 'bicycle|mtb|hiking|foot';
   const b = bbox.map((v) => v.toFixed(4)).join(',');
-  const q = `[out:json][timeout:25];rel[type=route][route~"^(${kinds})$"](${b})->.r;.r out body;rel(br.r)[type~"^(route|superroute)$"]->.p;.p out body;`;
-  const json = await overpass(q, signal, 40000);
+  const q = `[out:json][timeout:20];rel[type=route][route~"^(${kinds})$"](${b})->.r;.r out tags;rel(br.r)[type~"^(route|superroute)$"]->.p;.p out body;`;
+  const json = await overpass(q, signal, 30000);
   const map = new Map();
   for (const e of json.elements || []) {
     if (e.type !== 'relation') continue;
     const t = e.tags || {};
-    const prev = map.get(e.id);
-    const item = prev || {
+    const item = map.get(e.id) || {
       id: e.id, name: t.name || t['name:de'] || t.ref || '', ref: t.ref || '', kind: t.route || '', rank: RANK[t.network] ?? 4,
       km: parseFloat(String(t.distance || '').replace(',', '.')) || 0, website: t.website || t.url || '', parents: [], children: [],
-      // Rundweg: ausdrücklich so eingetragen, oder der Name sagt es
-      size: 0, // Zahl der Wegstücke: Maß für die Länge, solange nichts Genaueres bekannt ist
-      round: t.roundtrip === 'yes' || (t.roundtrip !== 'no' && /rund(weg|wanderweg|tour|kurs|e\b)|runde\b|\bloop\b/i.test(t.name || '')),
+      round: t.roundtrip === 'yes' || (t.roundtrip !== 'no' && looksRound(t.name)),
     };
-    if (e.members) for (const m of e.members) { if (m.type === 'relation') item.children.push(m.ref); else if (m.type === 'way') item.size++; }
+    if (e.members) for (const m of e.members) if (m.type === 'relation' && !item.children.includes(m.ref)) item.children.push(m.ref);
     map.set(e.id, item);
   }
-  for (const it of map.values()) for (const c of it.children) { const ch = map.get(c); if (ch && !ch.parents.includes(it.id)) { ch.parents.push(it.id); it.size += ch.size; } }
+  for (const it of map.values()) for (const c of it.children) { const ch = map.get(c); if (ch && !ch.parents.includes(it.id)) ch.parents.push(it.id); }
   return [...map.values()].filter((r) => r.name).sort(byImportance).slice(0, 200)
     .map((r) => ({ ...r, parentNames: r.parents.map((id) => map.get(id)).filter((x) => x && x.name).map((x) => x.name) }));
+}
+
+// Schnelle erste Liste von Waymarked Trails (fertig aufbereitete Routen aus OpenStreetMap). Liefert nur Name und
+// Einstufung; die vollständige Liste kommt danach von Overpass. Fällt der Dienst aus, bleibt es bei Overpass.
+const WMT = { bicycle: 'cycling', mtb: 'mtb', hiking: 'hiking' };
+const WMT_RANK = { INT: 0, NAT: 1, REG: 2, LOC: 3 };
+const mercator = (lat, lon) => [(lon * 20037508.34) / 180, (Math.log(Math.tan(((90 + lat) * Math.PI) / 360)) * 20037508.34) / Math.PI];
+
+export async function searchRoutesQuick(bbox, signal) {
+  const box = [...mercator(bbox[0], bbox[1]), ...mercator(bbox[2], bbox[3])].map((v) => v.toFixed(0)).join(',');
+  const ctrl = new AbortController(), stop = () => ctrl.abort(), timer = setTimeout(stop, 6000);
+  if (signal) signal.addEventListener('abort', stop);
+  try {
+    const res = await Promise.allSettled(Object.entries(WMT).map(async ([kind, host]) => {
+      const r = await fetch(`https://${host}.waymarkedtrails.org/api/v1/list/by_area?bbox=${box}&limit=40`, { signal: ctrl.signal });
+      if (!r.ok) throw new Error('Status ' + r.status);
+      return ((await r.json()).results || []).filter((e) => e.type === 'relation' && (e.name || e.ref)).map((e) => ({
+        id: e.id, name: e.name || e.ref, ref: e.ref || '', kind, rank: WMT_RANK[e.group] ?? 4, km: 0, website: '', parents: [], children: [], parentNames: [],
+        round: looksRound(e.name), quick: true }));
+    }));
+    if (signal && signal.aborted) { const e = new Error('abgebrochen'); e.name = 'AbortError'; throw e; }
+    const ok = res.filter((x) => x.status === 'fulfilled');
+    if (!ok.length) throw new Error('Schnelle Liste nicht erreichbar');
+    const seen = new Set();
+    return ok.flatMap((x) => x.value).filter((r) => !seen.has(r.id) && seen.add(r.id)).sort(byImportance);
+  } finally { clearTimeout(timer); if (signal) signal.removeEventListener('abort', stop); }
 }
 
 // ---------------------------------------------------------------- Strecke aus den Wegstücken
@@ -50,11 +79,51 @@ export async function searchRoutes(bbox, profile, signal) {
 const SKIP_ROLES = /^(alternative|excursion|approach|connection|link|platform|stop|guidepost)$/;
 const trackCache = new Map(), trackDone = new Map();
 
+// Geladene Strecken bleiben auf dem Gerät (Cache des Browsers), damit dieselbe Route beim nächsten Mal sofort da ist.
+const STORE = 'rw-tracks', STORE_INDEX = 'rueckenwind.tracks', STORE_DAYS = 30, STORE_MAX = 15;
+const storeUrl = (id) => location.origin + '/__track/' + id;
+const SLIM = ['highway', 'surface', 'tracktype', 'sac_scale', 'bicycle', 'smoothness'];
+const slim = (t) => { const o = {}; for (const k of SLIM) if (t && t[k]) o[k] = t[k]; return o; };
+
+function reviveTrack(j) {
+  const n = j.lat.length, lat = Float64Array.from(j.lat), lon = Float64Array.from(j.lon), cum = new Float64Array(n);
+  for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + haversine(lat[i - 1], lon[i - 1], lat[i], lon[i]);
+  return { lat, lon, cum, n, dist: cum[n - 1], ele: new Float64Array(n), segWay: Int32Array.from(j.segWay), wayTags: j.wayTags, gaps: j.gaps || [],
+    closed: !!j.closed, id: j.id, name: j.name, website: j.website || '' };
+}
+async function readStored(id) {
+  try {
+    if (typeof caches === 'undefined') return null;
+    const res = await (await caches.open(STORE)).match(storeUrl(id));
+    if (!res) return null;
+    const j = await res.json();
+    if (j.v !== 1 || Date.now() - j.at > STORE_DAYS * 864e5 || !Array.isArray(j.lat) || j.lat.length < 2) return null;
+    return reviveTrack(j);
+  } catch (e) { return null; }
+}
+async function writeStored(t) {
+  try {
+    if (typeof caches === 'undefined') return;
+    const r6 = (v) => Math.round(v * 1e6) / 1e6;
+    const body = JSON.stringify({ v: 1, at: Date.now(), id: t.id, name: t.name, website: t.website, closed: t.closed, gaps: t.gaps,
+      lat: Array.from(t.lat, r6), lon: Array.from(t.lon, r6), segWay: Array.from(t.segWay), wayTags: t.wayTags });
+    const cache = await caches.open(STORE);
+    await cache.put(storeUrl(t.id), new Response(body, { headers: { 'Content-Type': 'application/json' } }));
+    let index = [];
+    try { index = JSON.parse(localStorage.getItem(STORE_INDEX) || '[]'); } catch (e) { /* neu anfangen */ }
+    index = [t.id, ...index.filter((x) => x !== t.id)];
+    for (const old of index.slice(STORE_MAX)) cache.delete(storeUrl(old));
+    localStorage.setItem(STORE_INDEX, JSON.stringify(index.slice(0, STORE_MAX)));
+  } catch (e) { /* Speicher voll oder gesperrt: dann eben ohne */ }
+}
+
 /** Lädt eine Route (auch mit Unterrouten) und setzt die Wegstücke zu einer durchgehenden Strecke zusammen. */
 export async function loadRouteTrack(id, signal) {
   if (trackCache.has(id)) return trackCache.get(id);
   const q = `[out:json][timeout:90];rel(${id})->.t;rel(r.t)->.c1;rel(r.c1)->.c2;(.t;.c1;.c2;)->.all;.all out body;way(r.all);out geom tags;`;
   const job = (async () => {
+    const stored = await readStored(id);
+    if (stored) return stored;
     const json = await overpass(q, signal, 95000);
     const rels = new Map(), ways = new Map();
     for (const e of json.elements || []) {
@@ -73,8 +142,10 @@ export async function loadRouteTrack(id, signal) {
     };
     walk(top, 0);
     if (!list.length) throw new RouteError('Für diese Route sind keine Wege eingetragen.');
-    const t = top.tags || {};
-    return { ...chainWays(list), id, name: t.name || t['name:de'] || t.ref || 'Route', website: t.website || t.url || '' };
+    const t = top.tags || {}, chain = chainWays(list);
+    const track = { ...chain, wayTags: chain.wayTags.map(slim), id, name: t.name || t['name:de'] || t.ref || 'Route', website: t.website || t.url || '' };
+    writeStored(track);
+    return track;
   })();
   trackCache.set(id, job);
   job.then((t) => trackDone.set(id, t), () => trackCache.delete(id));
@@ -129,6 +200,9 @@ export async function prefetchPreviews(ids, bbox, signal) {
   }
   return out;
 }
+
+/** Bereits vorliegende Vorschau (aus der Liste), ohne neue Abfrage. */
+export const cachedPreview = (id) => (prefetched.has(id) && prefetched.get(id).features.length ? prefetched.get(id) : null);
 
 /**
  * Grobe Vorschau einer Route für den Kartenausschnitt. Reihenfolge: schon ganz geladene Strecke,
