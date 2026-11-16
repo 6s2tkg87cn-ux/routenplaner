@@ -34,21 +34,24 @@ function nearestFrom(route, lat, lon, from) {
 }
 
 // Stichstrecken entfernen: Führt die Route zu einem Wegpunkt hin und auf demselben Weg zurück,
-// wird der Wegpunkt an die Stelle gezogen, an der sich Hin- und Rückweg trennen.
-export function fixSpurs(route, vias) {
+// wird der Wegpunkt an die Stelle gezogen, an der die Stichstrecke von der Runde abzweigt.
+// "fixed" nennt Wegpunkte, die bleiben müssen (z. B. der Wunschpunkt des Nutzers).
+export function fixSpurs(route, vias, fixed = []) {
   let from = 0, changed = false;
   const out = vias.map((v) => {
     const idx = nearestFrom(route, v.lat, v.lon, from);
     from = idx;
+    if (fixed.some((f) => f.lat === v.lat && f.lon === v.lon)) return v;
     const d0 = route.cum[idx];
     const sep = (s) => {
       const a = pointAt(route, d0 - s), b = pointAt(route, d0 + s);
       return haversine(a.lat, a.lon, b.lat, b.lon);
     };
-    if (sep(250) > 120) return v;
-    let s = 250;
-    while (s < 6000 && d0 - s > 0 && d0 + s < route.dist && sep(s) < 120) s += 150;
-    const p = pointAt(route, Math.max(0, d0 - s));
+    // Hin- und Rückweg liegen 80 m vor und hinter dem Wegpunkt noch praktisch aufeinander: Stichstrecke
+    if (d0 < 80 || d0 > route.dist - 80 || sep(80) > 35) return v;
+    let s = 80;
+    while (s < 8000 && d0 - s > 0 && d0 + s < route.dist && sep(s) < 60) s += 40;
+    const p = pointAt(route, Math.max(0, d0 - s - 20));
     changed = true;
     return { lat: p.lat, lon: p.lon };
   });
@@ -104,33 +107,57 @@ export function pinsForDetour(newLeg, oldRoute) {
 }
 
 /**
- * Macht aus einer Runde mit doppelt befahrenen Stücken eine echte Runde: Der Rückweg (ab dem mittleren Wegpunkt)
- * wird neu gesucht, wobei der Hinweg gesperrt ist. Zusätzliche Wegpunkte halten den neuen Rückweg fest,
- * damit die Runde auch nach späterem Bearbeiten so bleibt.
+ * Macht aus einem Vorschlag eine echte Runde ohne doppelt befahrene Stücke. Zwei Mittel, mehrere Durchgänge:
+ * 1. Stichstrecken zu Wegpunkten: Wegpunkt an den Abzweig ziehen.
+ * 2. Rückweg auf dem Hinweg: Rückweg neu suchen, während der Hinweg gesperrt ist, und mit Stützpunkten festhalten.
+ * Von allen Zwischenständen gewinnt der mit der kürzesten Doppelstrecke (bei passender Länge).
  */
-async function removeOverlap(c, { start, target, profile, options, nogos, signal }) {
-  const before = overlapLength(c.route);
-  c.overlap = before;
-  if (before < Math.max(300, c.route.dist * 0.015) || c.vias.length < 2) return;
+async function removeOverlap(c, { start, target, profile, options, nogos, signal, fixed = [] }) {
+  const full = (vias) => fetchRoute({ profile, options, nogos, signal, points: [start, ...vias, start] });
+  const okLen = (r) => Math.abs(r.dist / target - 1) < 0.15;
+  let best = { route: c.route, vias: c.vias, overlap: overlapLength(c.route) };
+  const consider = (route, vias) => {
+    const overlap = overlapLength(route);
+    if (okLen(route) && overlap < best.overlap - 60) best = { route, vias, overlap };
+    return overlap;
+  };
+  // Stichstrecken in bis zu drei Durchgängen entfernen
+  const despur = async (state) => {
+    let cur = state;
+    for (let i = 0; i < 3; i++) {
+      const f = fixSpurs(cur.route, cur.vias, fixed);
+      if (!f.changed) break;
+      const r = await full(f.vias);
+      cur = { route: r, vias: f.vias };
+      consider(r, f.vias);
+    }
+    return cur;
+  };
   try {
-    const midIdx = Math.floor(c.vias.length / 2), mid = c.vias[midIdx];
-    // Hinweg: Strecke vom Start bis zum mittleren Wegpunkt
-    let from = 0, dMid = 0;
-    c.vias.slice(0, midIdx + 1).forEach((v) => { dMid = projectOnRoute(c.route, v.lat, v.lon, from).d; from = dMid; });
-    const blocks = [];
-    for (let d = 500; d < dMid - 300; d += 200) { const p = pointAt(c.route, d); blocks.push({ lat: p.lat, lon: p.lon, radius: 35 }); }
-    if (!blocks.length) return;
-    const back = await fetchRoute({ profile, options, signal, nogos: [...nogos, ...blocks], points: [mid, ...c.vias.slice(midIdx + 1), start] });
-    // neue Wegpunkte für den Rückweg: bisherige plus Stützpunkte, in der Reihenfolge entlang des Rückwegs
-    let f2 = 0;
-    const tail = c.vias.slice(midIdx + 1).map((v) => { const d = projectOnRoute(back, v.lat, v.lon, f2).d; f2 = d; return { lat: v.lat, lon: v.lon, d }; });
-    const merged = [...tail, ...pinsForDetour(back, c.route)].sort((x, y) => x.d - y.d).map((v) => ({ lat: v.lat, lon: v.lon }));
-    if (c.vias.length + merged.length - tail.length > 12) return; // zu viele Wegpunkte: so lassen
-    const vias = [...c.vias.slice(0, midIdx + 1), ...merged];
-    const full = await fetchRoute({ profile, options, nogos, signal, points: [start, ...vias, start] });
-    const after = overlapLength(full);
-    if (after < before * 0.6 && Math.abs(full.dist / target - 1) < 0.15) { c.route = full; c.vias = vias; c.overlap = after; }
+    await despur(best);
+    const small = () => best.overlap < Math.max(250, best.route.dist * 0.01);
+    if (!small() && best.vias.length >= 2 && best.vias.length <= 9) {
+      const b0 = best, midIdx = Math.floor(b0.vias.length / 2), mid = b0.vias[midIdx];
+      let from = 0, dMid = 0;
+      b0.vias.slice(0, midIdx + 1).forEach((v) => { dMid = projectOnRoute(b0.route, v.lat, v.lon, from).d; from = dMid; });
+      const blocks = [];
+      for (let d = 500; d < dMid - 300; d += 200) { const p = pointAt(b0.route, d); blocks.push({ lat: p.lat, lon: p.lon, radius: 35 }); }
+      if (blocks.length) {
+        const back = await fetchRoute({ profile, options, signal, nogos: [...nogos, ...blocks], points: [mid, ...b0.vias.slice(midIdx + 1), start] });
+        let f2 = 0;
+        const tail = b0.vias.slice(midIdx + 1).map((v) => { const d = projectOnRoute(back, v.lat, v.lon, f2).d; f2 = d; return { lat: v.lat, lon: v.lon, d }; });
+        const merged = [...tail, ...pinsForDetour(back, b0.route)].sort((x, y) => x.d - y.d).map((v) => ({ lat: v.lat, lon: v.lon }));
+        const vias = [...b0.vias.slice(0, midIdx + 1), ...merged];
+        if (vias.length <= 12) {
+          const r = await full(vias);
+          consider(r, vias);
+          // Stützpunkte können selbst Stichstrecken erzeugen: gleich wieder bereinigen
+          await despur({ route: r, vias });
+        }
+      }
+    }
   } catch (e) { if (e.name === 'AbortError') throw e; }
+  c.route = best.route; c.vias = best.vias; c.overlap = best.overlap;
 }
 
 async function buildCandidate({ start, target, bearing, clockwise, profile, options, nogos, signal }) {
@@ -288,8 +315,8 @@ async function viaRoundTrips({ start, via, target, climb, profile, options, nogo
   cands.forEach((c, i) => { c.score = -off(c.route) * 4 + sign * (hi > lo ? (perKm[i] - lo) / (hi - lo) : 0.5); });
   cands.sort((x, y) => y.score - x.score);
   const top = cands.slice(0, 3);
-  await Promise.all(top.map((c) => removeOverlap(c, { start, target, profile, options, nogos, signal })));
-  top.sort((x, y) => (x.overlap || 0) - (y.overlap || 0) > 500 ? 1 : (y.overlap || 0) - (x.overlap || 0) > 500 ? -1 : 0);
+  await Promise.all(top.map((c) => removeOverlap(c, { start, target, profile, options, nogos, signal, fixed: [via] })));
+  top.sort((x, y) => ((x.overlap || 0) - (y.overlap || 0) > 300 ? 1 : (y.overlap || 0) - (x.overlap || 0) > 300 ? -1 : 0));
   await orientForWind(top, wind, { start, target, profile, options, nogos, signal });
   return top;
 }
@@ -350,7 +377,7 @@ export async function generateRoundTrips({ start, km, direction, climb, profile,
   cands.sort((a, b) => b.score - a.score);
   const top = cands.slice(0, 3);
   await Promise.all(top.map((c) => removeOverlap(c, { start, target, profile, options, nogos, signal })));
-  top.sort((x, y) => (x.overlap || 0) - (y.overlap || 0) > 500 ? 1 : (y.overlap || 0) - (x.overlap || 0) > 500 ? -1 : 0);
+  top.sort((x, y) => ((x.overlap || 0) - (y.overlap || 0) > 300 ? 1 : (y.overlap || 0) - (x.overlap || 0) > 300 ? -1 : 0));
   await orientForWind(top, wind, { start, target, profile, options, nogos, signal });
   return top;
 }

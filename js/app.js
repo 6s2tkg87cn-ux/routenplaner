@@ -275,13 +275,17 @@ function initMap() {
   });
   // Ein einzelner Klick wird kurz zurückgehalten: Folgt ein zweiter, ist es ein Doppelklick zum Zoomen.
   let clickTimer = 0, lastClick = 0;
-  map.on('dblclick', () => { clearTimeout(clickTimer); lastClick = 0; });
+  // Auch ein beginnender Zoom (Doppeltipp am Tablet) oder ein Verschieben hebt den zurückgehaltenen Klick auf.
+  const cancelClick = () => { clearTimeout(clickTimer); clickTimer = 0; };
+  map.on('dblclick', () => { cancelClick(); lastClick = 0; });
+  map.on('zoomstart', cancelClick);
+  map.on('dragstart', cancelClick);
   map.on('click', (ev) => {
-    const now = Date.now(), second = now - lastClick < 280;
+    const now = Date.now(), second = now - lastClick < 500;
     lastClick = second ? 0 : now;
-    clearTimeout(clickTimer);
+    cancelClick();
     if (second) return;
-    clickTimer = setTimeout(() => handleMapClick(ev), 280);
+    clickTimer = setTimeout(() => { clickTimer = 0; handleMapClick(ev); }, 420);
   });
   function handleMapClick(ev) {
     if (nav) return;
@@ -1040,7 +1044,8 @@ function renderCandidates() {
         h('span', {}, h('b', { text: fmt(r.ascent) }), ' hm'),
         h('span', {}, h('b', { text: formatTime(tourHours(r)).replace(' h', '') }), ' h'),
         h('span', {}, h('b', { text: fmt(unpaved) }), ' % unbefestigt')),
-      c.windNote ? h('span', { class: 'cand-tag', text: c.windNote }) : null)));
+      c.windNote ? h('span', { class: 'cand-tag', text: c.windNote }) : null,
+      c.overlap > 300 ? h('span', { class: 'cand-tag', text: `${fmt(c.overlap / 1000, 1)} km doppelt befahren` }) : null)));
   });
 }
 
