@@ -109,6 +109,125 @@ function load() {
 }
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* Speicher nicht verfügbar */ }
+  trackUndo();
+}
+
+// ---------------------------------------------------------------- Rückgängig
+// Jeder gespeicherte Stand der Planung (Punkte, Profil, Einstellungen, Sperrzonen, übernommene Route) ist ein Schritt.
+// Die berechnete Strecke wird mitgemerkt, damit Rückgängig sofort wirkt, ohne neu zu rechnen.
+const UNDO_MAX = 40;
+let undoCur = null, undoBusy = false;
+const undoStack = [], redoStack = [];
+function planState() {
+  return {
+    mode: state.mode, profile: state.profile, options: structuredClone(state.options[state.profile]), loop: state.loop,
+    waypoints: state.waypoints.filter((w) => w.lat != null).map((w) => ({ lat: w.lat, lon: w.lon, label: w.label })),
+    nogos: state.nogos.map((n) => ({ lat: n.lat, lon: n.lon, radius: n.radius })),
+    rt: state.routeTour ? structuredClone(state.routeTour) : null,
+  };
+}
+// Vergleichsschlüssel ohne Ortsnamen (die kommen oft erst später nach)
+const planKey = (p) => JSON.stringify({ ...p, waypoints: p.waypoints.map((w) => [+w.lat.toFixed(6), +w.lon.toFixed(6)]) });
+
+function trackUndo() {
+  if (undoBusy) return;
+  const plan = planState(), key = planKey(plan);
+  if (!undoCur) { undoCur = { plan, key }; return; }
+  if (key === undoCur.key) { undoCur.plan = plan; return; } // nur Namen nachgetragen
+  undoStack.push(undoCur);
+  if (undoStack.length > UNDO_MAX) undoStack.shift();
+  redoStack.length = 0;
+  undoCur = { plan, key };
+  renderUndo();
+}
+// fertige Strecke dem aktuellen Stand zuordnen
+function noteRoute() {
+  if (undoCur && route && planKey(planState()) === undoCur.key) { undoCur.route = route; undoCur.alt = alt; }
+}
+
+// Was hat sich zwischen zwei Ständen geändert? Für die Meldung.
+function planDiff(a, b) {
+  if (a.profile !== b.profile) return 'Profil gewechselt';
+  if (JSON.stringify(a.rt) !== JSON.stringify(b.rt)) return a.rt || b.rt ? 'Route aus „Routen“' : 'Route';
+  if (a.mode !== b.mode) return 'Art der Planung gewechselt';
+  if (a.nogos.length !== b.nogos.length) return a.nogos.length < b.nogos.length ? 'Sperrzone gesetzt' : 'Sperrzone entfernt';
+  if (JSON.stringify(a.nogos) !== JSON.stringify(b.nogos)) return 'Sperrzone geändert';
+  if (JSON.stringify(a.options) !== JSON.stringify(b.options)) return 'Einstellung geändert';
+  if (a.waypoints.length === 0 && b.waypoints.length > 1) return 'Tour geladen';
+  if (b.waypoints.length === 0) return 'Neue Tour';
+  if (a.waypoints.length !== b.waypoints.length) return Math.abs(a.waypoints.length - b.waypoints.length) > 1 ? 'Wegpunkte geändert'
+    : a.waypoints.length < b.waypoints.length ? 'Punkt gesetzt' : 'Punkt entfernt';
+  if (a.loop !== b.loop) return b.loop ? 'Zurück zum Start eingeschaltet' : 'Zurück zum Start ausgeschaltet';
+  const same = (x, y) => x.length === y.length && x.every((w, i) => w.lat === y[i].lat && w.lon === y[i].lon);
+  const rev = b.loop ? [b.waypoints[0], ...b.waypoints.slice(1).reverse()] : [...b.waypoints].reverse();
+  if (same(a.waypoints, rev)) return 'Richtung umgekehrt';
+  const moved = a.waypoints.filter((w, i) => w.lat !== b.waypoints[i].lat || w.lon !== b.waypoints[i].lon).length;
+  if (moved > 1) return 'Wegpunkte geändert';
+  return 'Punkt verschoben';
+}
+
+function applyPlan(entry) {
+  const p = entry.plan;
+  undoBusy = true;
+  try {
+    state.mode = p.mode;
+    state.profile = p.profile;
+    state.options[p.profile] = structuredClone(p.options);
+    state.loop = p.loop;
+    state.routeTour = p.rt ? structuredClone(p.rt) : null;
+    state.nogos = p.nogos.map((n) => ({ ...n, id: uid() }));
+    state.waypoints = p.waypoints.map((w) => ({ id: uid(), ...w }));
+    while (state.waypoints.length < 2) state.waypoints.push(emptyWp());
+    if (state.mode === 'round') state.waypoints = state.waypoints.length > 1 && state.waypoints[1].lat != null ? state.waypoints : [state.waypoints[0], emptyWp()];
+    renderProfile(); renderOptions(); renderMode(); renderLoop(); renderWaypoints(); renderNogos(); renderRtInfo();
+    clearCandidates();
+    if (entry.route) {
+      // bereits berechnete Strecke wieder zeigen
+      if (routeCtrl) { routeCtrl.abort(); routeCtrl = null; }
+      clearTimeout(routeTimer);
+      $('busy').hidden = true;
+      route = entry.route;
+      alt = entry.alt || 0;
+      renderAlt();
+      save();
+      showRoute();
+    } else changed();
+  } finally { undoBusy = false; }
+  undoCur = entry;
+  renderUndo();
+}
+
+function undo() {
+  if (!undoStack.length || nav) return;
+  const prev = undoStack.pop(), what = planDiff(prev.plan, undoCur.plan);
+  redoStack.push(undoCur);
+  applyPlan(prev);
+  toast('Rückgängig: ' + what);
+}
+function redo() {
+  if (!redoStack.length || nav) return;
+  const next = redoStack.pop(), what = planDiff(undoCur.plan, next.plan);
+  undoStack.push(undoCur);
+  applyPlan(next);
+  toast('Wiederhergestellt: ' + what);
+}
+function renderUndo() {
+  if (!$('btnUndo')) return;
+  $('btnUndo').disabled = !undoStack.length;
+  $('btnRedo').hidden = !redoStack.length;
+}
+function initUndo() {
+  trackUndo();
+  $('btnUndo').addEventListener('click', undo);
+  $('btnRedo').addEventListener('click', redo);
+  document.addEventListener('keydown', (ev) => {
+    if (!(ev.metaKey || ev.ctrlKey) || ev.altKey || ev.key.toLowerCase() !== 'z' && ev.key.toLowerCase() !== 'y') return;
+    const t = ev.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return; // dort gilt das Rückgängig des Textfelds
+    ev.preventDefault();
+    if (ev.key.toLowerCase() === 'y' || ev.shiftKey) redo(); else undo();
+  });
+  renderUndo();
 }
 
 // ---------------------------------------------------------------- Karte
@@ -843,6 +962,7 @@ function formatTime(hours) {
 
 function showRoute() {
   setHover(null);
+  noteRoute();
   const has = !!route;
   $('dock').hidden = !has;
   $('tourBlock').hidden = !has;
@@ -2549,6 +2669,7 @@ function initFolds() {
 
 async function init() {
   load();
+  initUndo();
   initTabs();
   initFolds();
   initMap();

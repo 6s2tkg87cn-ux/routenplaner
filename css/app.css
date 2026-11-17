@@ -357,6 +357,8 @@ body.navigating .me-dot::after { content: ''; position: absolute; left: 50%; top
 .map-tools { position: absolute; top: 12px; left: 12px; z-index: 820; display: grid; gap: 8px; justify-items: start; }
 .tool-btn { width: 40px; height: 40px; border-radius: var(--r); border: 0; background: var(--panel); box-shadow: var(--shadow); display: grid; place-items: center; }
 .tool-btn:hover { color: var(--accent); }
+.tool-btn:disabled { opacity: 0.45; color: inherit; cursor: default; }
+.tool-btn[hidden] { display: none; }
 .layer-menu { position: absolute; left: 48px; top: 0; background: var(--panel); border-radius: var(--r); box-shadow: var(--shadow); padding: 4px; display: grid; min-width: 130px; }
 .menu-sep { font-size: 12px; font-weight: 500; color: var(--muted); padding: 8px 10px 4px; margin-top: 4px; border-top: 1px solid var(--line); }
 .layer-menu { min-width: 170px; max-height: calc(100dvh - 120px); overflow-y: auto; }
