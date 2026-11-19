@@ -13,7 +13,8 @@ import { generateRoundTrips, generateDetours } from './roundtrip.js';
 import { POI_CATS, POI_GROUPS, fetchPois, PoiError } from './pois.js';
 import { listOffline, planDownload, runDownload, removeDownload } from './offline.js';
 import { searchRoutes, searchRoutesQuick, loadRouteTrack, sliceTrack, previewRoute, cachedPreview, hasPreview, fetchRouteLengths, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
-import { fetchForecast, samplePoints, analyze, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
+import { fetchForecast, samplePoints, analyze, windProfile, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
+import { powerForSpeed, speedForPower, BIKE_WEIGHT } from './power.js';
 
 const $ = (id) => document.getElementById(id);
 const h = (tag, props = {}, ...kids) => {
@@ -64,6 +65,8 @@ const state = {
   rtKind: '',   // Art in der Routenliste: bicycle, mtb, hiking; leer = passend zum Profil
   rtMaxKm: 0,   // Länge höchstens (0 = beliebig)
   radar: false,
+  // Watt-Rechner: vorgeben, was man kennt (Schnitt oder Watt); Schnitt je Radtyp, leer = aus der Fahrzeit
+  power: { mode: 'speed', rider: 75, bike: { ...BIKE_WEIGHT }, speed: {}, watts: 180, wind: true },
   waypoints: [emptyWp(), emptyWp()],
   nogos: [],
   favorites: [],
@@ -99,6 +102,12 @@ function load() {
     state.rtRoundOnly = !!s.rtRoundOnly;
     if (['bicycle', 'mtb', 'hiking'].includes(s.rtKind)) state.rtKind = s.rtKind;
     if (s.rtMaxKm > 0) state.rtMaxKm = s.rtMaxKm;
+    if (s.power && typeof s.power === 'object') {
+      const pw = s.power;
+      state.power = { ...state.power, mode: pw.mode === 'watts' ? 'watts' : 'speed', wind: pw.wind !== false,
+        rider: pw.rider >= 30 && pw.rider <= 200 ? pw.rider : 75, watts: pw.watts >= 20 && pw.watts <= 1500 ? pw.watts : 180,
+        bike: { ...BIKE_WEIGHT, ...(pw.bike || {}) }, speed: { ...(pw.speed || {}) } };
+    }
     state.radar = !!s.radar;
     if (Array.isArray(s.waypoints) && s.waypoints.length >= 2) state.waypoints = s.waypoints.map((w) => ({ ...emptyWp(), ...w, id: uid() }));
     if (Array.isArray(s.nogos)) state.nogos = s.nogos.map((n) => ({ ...n, id: uid() }));
@@ -899,6 +908,7 @@ function renderProfile() {
         state.profile = key; renderProfile(); renderOptions(); changed();
       } }));
   }
+  schedulePower();
   $('speedLabel').textContent = { rennrad: 'Rennrad: Tempo in der Ebene', gravel: 'Gravelbike: Tempo in der Ebene', alltag: 'Alltagsrad: Tempo in der Ebene', wandern: 'Gehtempo in der Ebene' }[state.profile];
   renderRoundChips();
   $('speedInput').value = state.speeds[state.profile];
@@ -1806,6 +1816,7 @@ function renderRtLoops() {
 // ---------------------------------------------------------------- Abfahrt und Wetter
 
 let departDay = 0, wxCtrl = null, wxTimer = 0;
+let wxFc = null; // zuletzt geladene Vorhersage { r, samples, fcs } für den Watt-Rechner
 const clock = (t) => new Date(t * 1000).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
 
 function dayStartUnix() {
@@ -1862,6 +1873,7 @@ async function updateWeather() {
     const samples = samplePoints(r);
     const fcs = await fetchForecast(samples, ctrl.signal);
     if (ctrl !== wxCtrl || r !== route) return;
+    wxFc = { r, samples, fcs };
     const start = departUnix(), speed = tourSpeed(r);
     const a = analyze(r, samples, fcs, start, speed);
     if (!a) { chart.setWind(null); renderWindMap(null); return renderWeather(null, 'Für diesen Zeitpunkt gibt es keine Vorhersage. Wähle eine Abfahrt in den nächsten sieben Tagen.'); }
@@ -1902,6 +1914,7 @@ function windArrow(from) {
 }
 
 function renderWeather(w, note) {
+  schedulePower();
   const body = $('wxBody');
   body.replaceChildren();
   delete body.dataset.filled;
@@ -1956,6 +1969,109 @@ function renderWeather(w, note) {
   body.append(lead, facts);
   if (hints.children.length) body.append(hints);
   body.append(share);
+}
+
+// ---------------------------------------------------------------- Watt und Tempo
+// Aus Schnitt oder Watt das jeweils andere: Luft-, Roll- und Steigungswiderstand, Radtyp, Gewicht und Wind
+let pwTimer = 0;
+function schedulePower() { clearTimeout(pwTimer); pwTimer = setTimeout(renderPower, 120); }
+
+function initPower() {
+  const pw = state.power;
+  for (const b of $('pwModeSeg').children) b.addEventListener('click', () => { pw.mode = b.dataset.mode; save(); renderPower(); });
+  const num = (id, min, max, set) => $(id).addEventListener('change', () => {
+    const v = parseFloat(String($(id).value).replace(',', '.'));
+    if (v >= min && v <= max) { set(v); save(); }
+    renderPower();
+  });
+  num('pwInput', 2, 1500, (v) => {
+    if (pw.mode === 'speed') { if (v <= 80) pw.speed[state.profile] = v; } else if (v >= 20) pw.watts = Math.round(v);
+  });
+  num('pwRider', 30, 200, (v) => { pw.rider = v; });
+  num('pwBike', 3, 80, (v) => { pw.bike[state.profile] = v; });
+  $('pwWind').checked = pw.wind;
+  $('pwWind').addEventListener('change', () => { pw.wind = $('pwWind').checked; save(); renderPower(); });
+}
+
+function renderPower() {
+  const pw = state.power, prof = state.profile, foot = !!PROFILES[prof].foot;
+  $('pwBlock').hidden = foot;
+  if (foot) return;
+  const bikeName = { rennrad: 'Rennrad', gravel: 'Gravelbike', alltag: 'Alltagsrad' }[prof];
+  for (const b of $('pwModeSeg').children) b.setAttribute('aria-checked', String(b.dataset.mode === pw.mode));
+  const speedMode = pw.mode === 'speed';
+  const ownSpeed = route ? Math.round(tourSpeed(route) * 2) / 2 : state.speeds[prof];
+  const target = speedMode ? (pw.speed[prof] || ownSpeed) : pw.watts;
+  $('pwInputLabel').textContent = speedMode ? 'Schnitt über die ganze Tour' : 'Durchschnittsleistung';
+  $('pwUnit').textContent = speedMode ? 'km/h' : 'W';
+  Object.assign($('pwInput'), speedMode ? { min: 5, max: 80, step: 0.5 } : { min: 20, max: 1500, step: 5 });
+  if (document.activeElement !== $('pwInput')) $('pwInput').value = target;
+  if (document.activeElement !== $('pwRider')) $('pwRider').value = pw.rider;
+  if (document.activeElement !== $('pwBike')) $('pwBike').value = pw.bike[prof] ?? BIKE_WEIGHT[prof];
+  $('pwBikeLabel').textContent = bikeName + ' mit Gepäck';
+
+  const out = $('pwResult');
+  out.replaceChildren();
+  const note = (text) => out.append(h('p', { class: 'hint pw-note', text }));
+  if (!route) return note('Sobald eine Route steht, rechnet die App hier aus, wie viel Watt du für deinen Schnitt treten musst, oder umgekehrt.');
+
+  // Wind entlang der Strecke zur gewählten Abfahrt
+  let wind = null, windNote = '';
+  if (pw.wind) {
+    if (!wxFc || wxFc.r !== route) windNote = online() ? 'Wind noch nicht geladen, vorerst ohne Wind gerechnet.' : 'Ohne Internet keine Windvorhersage, ohne Wind gerechnet.';
+    else {
+      const guess = speedMode ? target : tourSpeed(route);
+      wind = windProfile(route, wxFc.samples, wxFc.fcs, departUnix(), guess);
+      if (!wind) windNote = 'Für diese Abfahrt gibt es keine Windvorhersage, ohne Wind gerechnet.';
+    }
+  }
+  const o = { profile: prof, rider: pw.rider, bike: pw.bike[prof] ?? BIKE_WEIGHT[prof], wind };
+  const calc = (opt) => (speedMode ? powerForSpeed(route, target, opt) : speedForPower(route, target, opt));
+  let res = calc(o);
+  // Bei vorgegebenen Watt hängt der Wind unterwegs vom Tempo ab: einmal mit dem errechneten Tempo nachrechnen
+  if (!speedMode && wind && res && Math.abs(res.v * 3.6 - tourSpeed(route)) > 1.5) {
+    const w2 = windProfile(route, wxFc.samples, wxFc.fcs, departUnix(), res.v * 3.6);
+    if (w2) { o.wind = w2; res = calc(o); }
+  }
+  if (!res) return note(`Diesen Schnitt schaffst du auf dieser Strecke nicht, auch nicht mit 2000 W. Bergab bremst die App auf ein sicheres Tempo.`);
+  const calm = o.wind ? calc({ ...o, wind: null }) : null;
+
+  const mass = pw.rider, kmh = res.v * 3.6;
+  const lead = speedMode
+    ? h('div', { class: 'wx-lead' }, `${fmt(res.avgP)} W `, h('small', { text: `im Schnitt, ${fmt(res.avgP / mass, 1)} W pro kg` }))
+    : h('div', { class: 'wx-lead' }, `${fmt(kmh, 1)} km/h `, h('small', { text: 'im Schnitt' }));
+  const facts = h('ul', { class: 'wx-facts' });
+  const fact = (label, b, rest = '') => facts.append(h('li', {}, label + ' ', h('b', { text: b }), rest));
+  fact('Fahrzeit', formatTime(res.T / 3600), speedMode ? '' : `, ${fmt(res.avgP / mass, 1)} W pro kg`);
+  if (calm) {
+    if (speedMode) {
+      const d = res.avgP - calm.avgP;
+      if (Math.abs(d) < 3) fact('Wind', 'spielt kaum eine Rolle');
+      else fact('Wind', d > 0 ? `kostet etwa ${fmt(d)} W` : `spart etwa ${fmt(-d)} W`, `, ohne Wind ${fmt(calm.avgP)} W`);
+    } else {
+      const d = kmh - calm.v * 3.6;
+      if (Math.abs(d) < 0.3) fact('Wind', 'spielt kaum eine Rolle');
+      else fact('Wind', d < 0 ? `bremst dich um ${fmt(-d, 1)} km/h` : `schiebt dich um ${fmt(d, 1)} km/h an`, `, ohne Wind ${fmt(calm.v * 3.6, 1)} km/h`);
+    }
+  }
+  if (res.P > res.avgP * 1.06) fact('Beim Treten', `etwa ${fmt(res.P)} W`, ', bergab rollst du zeitweise');
+  fact('Arbeit', `${fmt(res.E / 1000)} kJ`, ', das sind grob so viele kcal');
+
+  // Wofür die Kraft gebraucht wird
+  const sum = res.air + res.roll + res.climb;
+  const share = h('div', { class: 'comp', style: 'margin-top:0' }, h('h3', { text: 'Wofür die Kraft gebraucht wird' }));
+  const bar = h('div', { class: 'cbar', role: 'img', 'aria-label': 'Anteile der Widerstände' }), legend = h('ul', { class: 'clegend' });
+  for (const [cls, label, v] of [['air', 'Luftwiderstand', res.air], ['roll', 'Rollwiderstand', res.roll], ['climb', 'Steigungen', res.climb]]) {
+    const pct = (v / sum) * 100;
+    if (pct < 0.5) continue;
+    bar.append(h('span', { class: 'pw-' + cls, style: `flex:${pct.toFixed(1)} 0 0` }));
+    legend.append(h('li', {}, h('i', { class: 'sw pw-' + cls }), h('span', { text: label }), h('span', {}), h('span', { class: 'cl-pct', text: fmt(pct) + ' %' })));
+  }
+  share.append(bar, legend);
+  out.append(lead, facts, share);
+  if (windNote) note(windNote);
+  note(`Gerechnet mit gleichmäßigem Treten und Sitzhaltung auf dem ${bikeName}, Rollwiderstand je nach Untergrund, bergab gebremst.`
+    + (route.hasEle ? '' : ' Ohne Höhendaten, also ohne Steigungen.') + ' Haltung, Reifen und Kleidung machen leicht 10 % Unterschied.');
 }
 
 // ---------------------------------------------------------------- Navigation
@@ -2675,6 +2791,7 @@ async function init() {
   initMap();
   initRound();
   initWeather();
+  initPower();
   const setArmed = (on) => { $('btnRange').setAttribute('aria-pressed', String(on)); $('btnRange').textContent = on ? 'Jetzt im Profil ziehen' : 'Bereich wählen'; };
   chart = createProfileChart($('profileChart'), { onHover: (d, p) => setHover(d, p), onSelect: selectRange, onArm: setArmed });
   $('btnRange').addEventListener('click', () => { const on = $('btnRange').getAttribute('aria-pressed') !== 'true'; chart.arm(on); setArmed(on); });
@@ -2723,7 +2840,7 @@ async function init() {
   });
   $('speedInput').addEventListener('change', () => {
     const v = parseFloat($('speedInput').value);
-    if (v >= 2 && v <= 60) { state.speeds[state.profile] = v; save(); renderTime(); scheduleWeather(); } else $('speedInput').value = state.speeds[state.profile];
+    if (v >= 2 && v <= 60) { state.speeds[state.profile] = v; save(); renderTime(); scheduleWeather(); schedulePower(); } else $('speedInput').value = state.speeds[state.profile];
   });
   $('btnLocate').addEventListener('click', () => locate(null));
   $('btnGpx').addEventListener('click', downloadGpx);

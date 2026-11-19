@@ -87,6 +87,23 @@ export function samplePoints(route) {
 }
 
 /**
+ * Wind und Temperatur entlang der Strecke, etwa jeden Kilometer, zu der Zeit, zu der man dort ist.
+ * Liefert [{ d, wind (km/h, 10 m Höhe), wdir (woher, Grad), temp }] oder null außerhalb der Vorhersage.
+ */
+export function windProfile(route, samples, forecasts, start, speed) {
+  const mps = speed / 3.6, n = Math.max(2, Math.min(300, Math.round(route.dist / 1000) + 1)), out = [];
+  for (let i = 0; i < n; i++) {
+    const d = (route.dist * i) / (n - 1);
+    let best = 0;
+    for (let k = 1; k < samples.length; k++) if (Math.abs(samples[k].d - d) < Math.abs(samples[best].d - d)) best = k;
+    const w = at(forecasts[Math.min(best, forecasts.length - 1)], start + d / mps);
+    if (!w || w.wind == null) return null;
+    out.push({ d, wind: w.wind, wdir: w.wdir, temp: w.temp });
+  }
+  return out;
+}
+
+/**
  * Wertet Wetter und Wind für eine Fahrt aus.
  * start: Unix-Sekunden, speed: km/h, reverse: Strecke in Gegenrichtung fahren.
  * Liefert null, wenn die Fahrt außerhalb des Vorhersagezeitraums liegt.

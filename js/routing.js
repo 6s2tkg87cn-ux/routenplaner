@@ -377,13 +377,13 @@ export function travelHours(route, profile, speed) {
 // Fahrzeit mit dem Rad aus Steigung und Untergrund: Aus dem Tempo in der Ebene wird die Leistung bestimmt,
 // die du dort trittst. Mit dieser Leistung wird für jedes Stück der Strecke das Tempo berechnet
 // (Steigung, Rollwiderstand des Untergrunds, Luftwiderstand), bergab begrenzt durch Bremsen.
-const BIKE = {
+export const BIKE = {
   rennrad: { cda: 0.32, crr: 0.005, vmax: 60, mass: 84 },
   gravel: { cda: 0.38, crr: 0.007, vmax: 48, mass: 86 },
   alltag: { cda: 0.5, crr: 0.008, vmax: 38, mass: 92 },
 };
-const ROLL = { asphalt: 1, pflaster: 1.8, schotter: 2.2, natur: 3.2, unbekannt: 1.6 };
-const VCAP = { asphalt: 99, pflaster: 28, schotter: 32, natur: 22, unbekannt: 35 }; // km/h, was der Untergrund zulässt
+export const ROLL = { asphalt: 1, pflaster: 1.8, schotter: 2.2, natur: 3.2, unbekannt: 1.6 };
+export const VCAP = { asphalt: 99, pflaster: 28, schotter: 32, natur: 22, unbekannt: 35 }; // km/h, was der Untergrund zulässt
 
 function rideHours(route, profile, speedFlat) {
   const b = BIKE[profile] || BIKE.alltag, g = 9.81, rho = 1.2;

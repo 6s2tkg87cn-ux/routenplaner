@@ -504,3 +504,11 @@ body.navigating .me-dot::after { content: ''; position: absolute; left: 50%; top
 }
 
 #rtSearch .rt-lead { margin-bottom: 12px; }
+
+/* Watt und Tempo */
+#pwBlock .fold-body { display: grid; gap: 14px; }
+#pwBlock .form-grid input { width: 4.2em; }
+.pw-air { background: var(--cat-1); }
+.pw-roll { background: var(--cat-0); }
+.pw-climb { background: var(--cat-2); }
+.pw-note { margin: 0; }

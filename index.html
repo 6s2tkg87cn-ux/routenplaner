@@ -177,6 +177,29 @@
         </div>
       </section>
 
+      <section class="block" data-tab="wetter" id="pwBlock">
+        <h2>Watt und Tempo</h2>
+        <div class="fold-body">
+          <div class="seg seg-small" id="pwModeSeg" role="radiogroup" aria-label="Was möchtest du vorgeben?">
+            <button type="button" role="radio" data-mode="speed">Schnitt vorgeben</button>
+            <button type="button" role="radio" data-mode="watts">Watt vorgeben</button>
+          </div>
+          <div class="form-grid form-grid-wide">
+            <label class="form-label" for="pwInput" id="pwInputLabel">Schnitt über die ganze Tour</label>
+            <span class="num-field"><input id="pwInput" type="number" inputmode="decimal"> <span id="pwUnit">km/h</span></span>
+            <label class="form-label" for="pwRider">Dein Gewicht</label>
+            <span class="num-field"><input id="pwRider" type="number" inputmode="decimal" min="30" max="200" step="1"> kg</span>
+            <label class="form-label" for="pwBike" id="pwBikeLabel">Rad mit Gepäck</label>
+            <span class="num-field"><input id="pwBike" type="number" inputmode="decimal" min="3" max="80" step="0.5"> kg</span>
+          </div>
+          <div class="row-toggle">
+            <label for="pwWind"><span class="opt-label">Wind einrechnen</span><span class="opt-note">Vorhersage zur gewählten Abfahrt, in Fahrerhöhe.</span></label>
+            <input type="checkbox" id="pwWind" class="switch">
+          </div>
+          <div id="pwResult" class="wx-body"></div>
+        </div>
+      </section>
+
       <details class="block fold" data-fold="opt" data-tab="plan" open>
         <summary><span>Optionen</span><button id="btnResetOpt" class="link-btn" type="button">Zurücksetzen</button></summary>
         <div class="fold-body">
