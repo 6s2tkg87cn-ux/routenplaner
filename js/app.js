@@ -12,7 +12,7 @@ import { createProfileChart } from './elevation.js';
 import { generateRoundTrips, generateDetours } from './roundtrip.js';
 import { POI_CATS, POI_GROUPS, fetchPois, PoiError } from './pois.js';
 import { listOffline, planDownload, runDownload, removeDownload } from './offline.js';
-import { searchRoutes, searchRoutesQuick, loadRouteTrack, sliceTrack, previewRoute, cachedPreview, hasPreview, fetchRouteLengths, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
+import { searchRoutes, searchRoutesQuick, loadRouteTrack, sliceTrack, previewRoute, cachedPreview, hasPreview, previewCovers, fetchRouteLengths, prefetchPreviews, byImportance, buildRouteTour, suggestRouteLoops, routeLabel } from './routes.js';
 import { fetchForecast, samplePoints, analyze, windProfile, penalty, bestStart, at as weatherAt, codeText, compass, WeatherError } from './weather.js';
 import { powerForSpeed, speedForPower, BIKE_WEIGHT } from './power.js';
 
@@ -244,6 +244,7 @@ function initUndo() {
 const OSM = '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>';
 const raster = (tiles, attribution, maxzoom) => ({
   version: 8,
+  glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf', // Schrift für die Namen der Routen
   sources: { base: { type: 'raster', tiles, tileSize: 256, attribution, maxzoom } },
   layers: [{ id: 'base', type: 'raster', source: 'base' }],
 });
@@ -353,10 +354,15 @@ function addOverlays() {
   // Vorschau beim Überfahren der Liste: grob, gestrichelt
   // alle Routen der Liste; die hervorgehobene (Maus, gerade geöffnet) liegt darüber
   map.addLayer({ id: 'rtall-casing', type: 'line', source: 'rtall', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 6, 'line-opacity': 0.85 } });
-  map.addLayer({ id: 'rtall-line', type: 'line', source: 'rtall', layout: round, paint: { 'line-color': '#2a78d6', 'line-width': 3, 'line-opacity': 0.85 } });
+  map.addLayer({ id: 'rtall-line', type: 'line', source: 'rtall', layout: round, paint: { 'line-color': ['get', 'color'], 'line-width': 3.2, 'line-opacity': 0.9 } });
   map.addLayer({ id: 'rtall-hit', type: 'line', source: 'rtall', paint: { 'line-color': '#000', 'line-width': 18, 'line-opacity': 0.01 } });
+  // Namen entlang der Linien, in der Farbe der Route (nur, wenn der Kartenstil eine Schrift mitbringt)
+  if (map.getStyle().glyphs) map.addLayer({ id: 'rtall-label', type: 'symbol', source: 'rtall', minzoom: 8.5,
+    layout: { 'symbol-placement': 'line', 'symbol-spacing': 320, 'text-field': ['get', 'name'], 'text-font': ['Noto Sans Bold'], 'text-size': 12.5,
+      'text-max-angle': 35, 'text-padding': 6, 'text-offset': [0, -0.85], 'symbol-sort-key': ['get', 'rank'] },
+    paint: { 'text-color': ['get', 'ink'], 'text-halo-color': '#ffffff', 'text-halo-width': 2.2, 'text-halo-blur': 0.3 } });
   map.addLayer({ id: 'rtprev-casing', type: 'line', source: 'rtprev', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 9, 'line-opacity': 0.95 } });
-  map.addLayer({ id: 'rtprev-line', type: 'line', source: 'rtprev', layout: round, paint: { 'line-color': '#1f5fae', 'line-width': 5 } });
+  map.addLayer({ id: 'rtprev-line', type: 'line', source: 'rtprev', layout: round, paint: { 'line-color': ['coalesce', ['get', 'color'], '#1f5fae'], 'line-width': 5 } });
   map.addLayer({ id: 'rt-casing', type: 'line', source: 'rtrack', layout: round, paint: { 'line-color': '#ffffff', 'line-width': 7, 'line-opacity': 0.9 } });
   map.addLayer({ id: 'rt-line', type: 'line', source: 'rtrack', layout: round, paint: { 'line-color': '#2a78d6', 'line-width': 3.5, 'line-opacity': 0.75 } });
   map.addLayer({ id: 'rsec-line', type: 'line', source: 'rsec', layout: round, paint: { 'line-color': '#1f5fae', 'line-width': 7 } });
@@ -423,6 +429,7 @@ function initMap() {
     const c = map.getCenter();
     state.view = { lat: c.lat, lon: c.lng, zoom: map.getZoom() };
     save();
+    scheduleExtend();
   });
   // Ein einzelner Klick wird kurz zurückgehalten: Folgt ein zweiter, ist es ein Doppelklick zum Zoomen.
   let clickTimer = 0, lastClick = 0;
@@ -473,7 +480,7 @@ function initMap() {
     map.getCanvas().style.cursor = 'pointer';
     if (id === rtHover) return;
     rtHover = id;
-    setOverlay('rtprev', cachedPreview(id) || EMPTY);
+    setOverlay('rtprev', tinted(id, cachedPreview(id)));
   });
   map.on('mouseleave', 'rtall-hit', () => { map.getCanvas().style.cursor = ''; rtHover = null; if (!rtLoading) setOverlay('rtprev', EMPTY); });
   map.on('mouseenter', 'cand-hit', () => { map.getCanvas().style.cursor = 'pointer'; });
@@ -1355,6 +1362,7 @@ function initRoutes() {
     $('busy').hidden = true;
     setOverlay('rtprev', EMPTY);
     renderRtSel(); renderRtMap();
+    scheduleExtend();
   });
   $('btnRtReverse').addEventListener('click', () => { if (!rtSec) return; rtSec = { from: rtSec.to, to: rtSec.from }; renderRtSel(); renderRtMap(); });
   $('rtApproach').checked = state.rtOpts.approach;
@@ -1404,6 +1412,7 @@ async function runRtSearch() {
   rtList = [];
   rtOpen = {};
   rtBbox = bbox; rtLenReady = false; rtLenFailed = false;
+  rtColors.clear(); rtBoxes.clear();
   renderRtList();
   rtStatus('Routen werden gesucht …');
   $('btnRtSearch').disabled = true;
@@ -1451,7 +1460,7 @@ async function ensurePreviews() {
       note('Linien für die Karte werden geladen …');
       await pause(part ? 1200 : 400);
       try {
-        const km = await prefetchPreviews(ids, bbox, ctrl.signal);
+        const km = await prefetchPreviews(ids, padBox(bbox, 0.25), ctrl.signal, bbox);
         if (!mine()) return;
         for (const r of rtList) if (km.has(r.id)) r.visKm = km.get(r.id);
         got = true;
@@ -1473,7 +1482,70 @@ async function ensurePreviews() {
   } finally {
     rtPreBusy = false;
     if (rtPreAgain && mine()) ensurePreviews();
+    else if (rtExtendAgain && mine()) { rtExtendAgain = false; extendPreviews(); }
   }
+}
+
+// Ausschnitt um "f" (Anteil je Seite) vergrößern
+const padBox = ([s, w, n, e], f) => { const dy = (n - s) * f, dx = (e - w) * f; return [s - dy, w - dx, n + dy, e + dx]; };
+
+// Wird die Karte verschoben oder herausgezoomt, fehlen die Teile der Routen außerhalb des geladenen Ausschnitts:
+// für die Routen der Liste nachladen (nur in der Listenansicht, nicht bei sehr großen Ausschnitten)
+let extendTimer = 0, rtExtendAgain = false;
+function scheduleExtend() {
+  clearTimeout(extendTimer);
+  if (state.tab === 'routen' && rtBbox && !rtSel && !rtLoading) extendTimer = setTimeout(extendPreviews, 700);
+}
+async function extendPreviews() {
+  if (state.tab !== 'routen' || !rtBbox || !rtSearchCtrl || rtSel || rtLoading || map.getZoom() < 8) return;
+  if (rtPreBusy) { rtExtendAgain = true; return; }
+  const b = map.getBounds(), view = padBox([b.getSouth(), b.getWest(), b.getNorth(), b.getEast()], 0.15);
+  const ids = rtVisible().filter((r) => hasPreview(r.id) && !previewCovers(r.id, view)).slice(0, 60).map((r) => r.id);
+  if (!ids.length) return;
+  const ctrl = rtSearchCtrl;
+  rtPreBusy = true; rtExtendAgain = false;
+  try {
+    await prefetchPreviews(ids, view, ctrl.signal, rtBbox);
+    if (ctrl === rtSearchCtrl) renderRtAll();
+  } catch (e) { /* bleibt bei den vorhandenen Linien */ } finally {
+    rtPreBusy = false;
+    if (ctrl === rtSearchCtrl && (rtExtendAgain || rtPreAgain)) { rtExtendAgain = false; if (rtPreAgain) ensurePreviews(); else extendPreviews(); }
+  }
+}
+
+// Farben der Routen auf der Karte. Jede Route behält ihre Farbe; benachbarte Routen bekommen möglichst verschiedene.
+const RT_COLORS = [
+  { color: '#2a78d6', ink: '#1d5aa3' }, { color: '#eb6834', ink: '#b8461a' }, { color: '#1baf7a', ink: '#11785a' },
+  { color: '#6250d6', ink: '#4a3ab0' }, { color: '#d99400', ink: '#8f6200' }, { color: '#0e8fa3', ink: '#0a6878' },
+];
+const rtColors = new Map(); // Route -> Index in RT_COLORS
+const rtBoxes = new Map();  // Route -> grober Ausschnitt der Linien (für die Nachbarschaft)
+function lineBox(fc) {
+  let s = 90, w = 180, n = -90, e = -180;
+  const g = fc.features[0].geometry, lines = g.type === 'LineString' ? [g.coordinates] : g.coordinates;
+  for (const l of lines) for (const [lon, lat] of l) { if (lat < s) s = lat; if (lat > n) n = lat; if (lon < w) w = lon; if (lon > e) e = lon; }
+  return [s, w, n, e];
+}
+function rtColor(r) {
+  if (rtColors.has(r.id)) return RT_COLORS[rtColors.get(r.id)];
+  const fc = cachedPreview(r.id);
+  if (!fc) return null;
+  const box = lineBox(fc), near = new Array(RT_COLORS.length).fill(0);
+  rtBoxes.set(r.id, box);
+  for (const [id, c] of rtColors) {
+    const o = rtBoxes.get(id);
+    if (o && o[0] <= box[2] && o[2] >= box[0] && o[1] <= box[3] && o[3] >= box[1]) near[c]++;
+  }
+  // die Farbe, die in der Nachbarschaft am seltensten vorkommt; bei Gleichstand die vorderste
+  const pick = near.indexOf(Math.min(...near));
+  rtColors.set(r.id, pick);
+  return RT_COLORS[pick];
+}
+// Linie einer Route mit ihrer Farbe (für die Hervorhebung)
+function tinted(id, fc) {
+  if (!fc || !fc.features.length) return EMPTY;
+  const r = rtList.find((x) => x.id === id), c = r && rtColor(r);
+  return c ? { type: 'FeatureCollection', features: fc.features.map((f) => ({ ...f, properties: { ...f.properties, color: c.color } })) } : fc;
 }
 
 // Alle Routen der Liste als Linien auf der Karte (nur in der Listenansicht)
@@ -1482,9 +1554,13 @@ function renderRtAll() {
   const show = state.tab === 'routen' && !rtSel && !rtLoading;
   const features = [];
   if (show) {
-    for (const r of rtVisible()) {
-      const fc = cachedPreview(r.id);
-      if (fc) features.push({ type: 'Feature', properties: { id: r.id }, geometry: fc.features[0].geometry });
+    // wichtigste zuerst: sie bekommen bei der Farbwahl den Vortritt
+    const list = rtVisible(), shown = new Set(list.filter((r) => cachedPreview(r.id)).map((r) => r.id));
+    for (const r of [...list].sort(byImportance)) {
+      // Teilabschnitte stecken in der übergeordneten Route, solange die mit Linie gezeigt wird
+      if (r.parents.some((p) => shown.has(p))) continue;
+      const fc = cachedPreview(r.id), c = fc && rtColor(r);
+      if (c) features.push({ type: 'Feature', properties: { id: r.id, name: r.name, rank: r.rank, color: c.color, ink: c.ink }, geometry: fc.features[0].geometry });
     }
   }
   setOverlay('rtall', { type: 'FeatureCollection', features });
@@ -1499,6 +1575,14 @@ function rtPick(box, lat, lon) {
   if (hits.length === 1) return openRoute(hits[0]);
   openMenu(lat, lon, h('div', { class: 'map-menu' }, h('strong', { text: `${hits.length} Routen an dieser Stelle` }),
     ...hits.slice(0, 8).map((r) => h('button', { type: 'button', text: r.name, onclick: () => { closeMenu(); openRoute(r); } }))));
+}
+
+// kleines Linienstück in der Farbe der Route, wie auf der Karte
+function rtSwatch(r) {
+  // Teilabschnitte tragen die Farbe der übergeordneten Route
+  const id = rtColors.has(r.id) ? r.id : r.parents.find((p) => rtColors.has(p));
+  const c = id != null ? RT_COLORS[rtColors.get(id)] : null;
+  return h('i', { class: 'rt-swatch', style: c ? `background:${c.color}` : '', 'aria-hidden': 'true' });
 }
 
 const RT_LEVELS = ['International', 'National', 'Regional', 'Lokal', 'Ohne Einstufung'];
@@ -1525,7 +1609,7 @@ function renderRtList() {
   const ids = new Set(list.map((r) => r.id)), byId = new Map(list.map((r) => [r.id, r]));
   const item = (r, small) => h('li', {}, h('button', { type: 'button', class: 'cand', onclick: () => openRoute(r),
     onmouseenter: () => schedulePreview(r), onmouseleave: () => cancelPreview(), onfocus: () => schedulePreview(r), onblur: () => cancelPreview() },
-  h('span', { class: 'cand-top' }, h('span', { class: 'cand-name', text: r.name }), r.round ? h('span', { class: 'rt-round', text: 'Rundweg' }) : null),
+  h('span', { class: 'cand-top' }, rtSwatch(r), h('span', { class: 'cand-name', text: r.name }), r.round ? h('span', { class: 'rt-round', text: 'Rundweg' }) : null),
   small ? null : h('span', { class: 'cand-nums' }, h('span', { text: routeLabel(r) + (r.visKm >= 0.5 ? `, ${fmt(r.visKm)} km im Ausschnitt` : '') }))));
   const fold = (key, def, el) => { el.open = key in rtOpen ? rtOpen[key] : def; el.addEventListener('toggle', () => { rtOpen[key] = el.open; }); return el; };
   const top = list.filter((r) => !r.parents.some((p) => ids.has(p)));
@@ -1561,7 +1645,7 @@ function schedulePreview(r) {
     const b = map.getBounds(), dLat = (b.getNorth() - b.getSouth()) * 0.3, dLon = (b.getEast() - b.getWest()) * 0.3;
     try {
       const fc = await previewRoute(r.id, [b.getSouth() - dLat, b.getWest() - dLon, b.getNorth() + dLat, b.getEast() + dLon], ctrl.signal);
-      if (ctrl === prevCtrl && prevFor === r.id) setOverlay('rtprev', fc);
+      if (ctrl === prevCtrl && prevFor === r.id) setOverlay('rtprev', tinted(r.id, fc));
     } catch (e) { /* Vorschau ist nur ein Extra */ }
   }, 300);
 }

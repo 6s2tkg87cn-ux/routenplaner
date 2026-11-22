@@ -179,11 +179,45 @@ function linesOf(ways) {
   return { fc, km: len / 1000 };
 }
 
+// Linien der Vorschau wachsen mit: Was für einen weiteren Ausschnitt nachgeladen wird, kommt zu den
+// vorhandenen Wegstücken dazu. Gemerkt wird auch, für welche Ausschnitte eine Route schon vollständig da ist.
+const prevWays = new Map();  // Route -> Map(Weg -> [[lon, lat], …])
+const prevAreas = new Map(); // Route -> [[Süd, West, Nord, Ost], …]
+
+function mergePreview(id, ways, bbox) {
+  if (!prevWays.has(id)) prevWays.set(id, new Map());
+  const m = prevWays.get(id);
+  for (const w of ways) {
+    if (m.has(w.id)) continue;
+    const c = (w.geometry || []).filter((g) => g && Number.isFinite(g.lat)).map((g) => [g.lon, g.lat]);
+    if (c.length > 1) m.set(w.id, c);
+  }
+  if (!prevAreas.has(id)) prevAreas.set(id, []);
+  prevAreas.get(id).push(bbox);
+  const lines = [...m.values()];
+  prefetched.set(id, { type: 'FeatureCollection', features: lines.length ? [{ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: lines } }] : [] });
+}
+
+// Länge der Route innerhalb eines Ausschnitts in km (Wegstücke, deren Mitte darin liegt)
+function kmInside(id, [s, w, n, e]) {
+  let len = 0;
+  for (const c of (prevWays.get(id) || new Map()).values()) {
+    for (let i = 1; i < c.length; i++) {
+      const lat = (c[i - 1][1] + c[i][1]) / 2, lon = (c[i - 1][0] + c[i][0]) / 2;
+      if (lat >= s && lat <= n && lon >= w && lon <= e) len += haversine(c[i - 1][1], c[i - 1][0], c[i][1], c[i][0]);
+    }
+  }
+  return len / 1000;
+}
+
+/** Ist die Vorschau dieser Route für den Ausschnitt schon vollständig geladen? */
+export const previewCovers = (id, [s, w, n, e]) => (prevAreas.get(id) || []).some((a) => a[0] <= s && a[1] <= w && a[2] >= n && a[3] >= e);
+
 /**
- * Vorschau für alle Routen einer Liste auf einmal laden (nur die Wegstücke im Kartenausschnitt).
- * Liefert je Route die Länge im Ausschnitt; die Linien liegen danach für die Vorschau bereit.
+ * Vorschau für alle Routen einer Liste auf einmal laden (die Wegstücke im Ausschnitt "bbox"; kommt für eine
+ * Route schon etwas vor, wird ergänzt). Liefert je Route die Länge innerhalb von "countBox" (Suchausschnitt).
  */
-export async function prefetchPreviews(ids, bbox, signal) {
+export async function prefetchPreviews(ids, bbox, signal, countBox = bbox) {
   if (!ids.length) return new Map();
   const b = bbox.map((v) => v.toFixed(3)).join(',');
   const groups = new Map();
@@ -219,9 +253,8 @@ export async function prefetchPreviews(ids, bbox, signal) {
   }
   const out = new Map();
   for (const id of ids) {
-    const { fc, km } = linesOf(groups.get(id) || []);
-    prefetched.set(id, fc);
-    out.set(id, km);
+    mergePreview(id, groups.get(id) || [], bbox);
+    out.set(id, kmInside(id, countBox));
   }
   return out;
 }
@@ -242,21 +275,29 @@ export async function fetchRouteLengths(ids, signal) {
 }
 
 /** Bereits vorliegende Vorschau (aus der Liste), ohne neue Abfrage. */
-export const cachedPreview = (id) => (prefetched.has(id) && prefetched.get(id).features.length ? prefetched.get(id) : null);
+export function cachedPreview(id) {
+  // Eine schon einmal ganz geladene Strecke ist vollständig; sonst die Vorschau aus der Liste
+  if (trackDone.has(id)) return trackFc(trackDone.get(id));
+  return prefetched.has(id) && prefetched.get(id).features.length ? prefetched.get(id) : null;
+}
+const trackFcs = new WeakMap();
+function trackFc(t) {
+  if (!trackFcs.has(t)) {
+    const step = Math.max(1, Math.floor(t.n / 3000)), coordinates = [];
+    for (let i = 0; i < t.n; i += step) coordinates.push([t.lon[i], t.lat[i]]);
+    coordinates.push([t.lon[t.n - 1], t.lat[t.n - 1]]);
+    trackFcs.set(t, { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates } }] });
+  }
+  return trackFcs.get(t);
+}
 
 /**
  * Grobe Vorschau einer Route für den Kartenausschnitt. Reihenfolge: schon ganz geladene Strecke,
  * vorab geladene Vorschau der Liste, sonst eine eigene schnelle Abfrage nur für diese Route.
  */
 export async function previewRoute(id, bbox, signal) {
-  const done = trackDone.get(id);
-  if (done) {
-    const step = Math.max(1, Math.floor(done.n / 3000)), coordinates = [];
-    for (let i = 0; i < done.n; i += step) coordinates.push([done.lon[i], done.lat[i]]);
-    coordinates.push([done.lon[done.n - 1], done.lat[done.n - 1]]);
-    return { type: 'FeatureCollection', features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates } }] };
-  }
-  if (prefetched.has(id) && prefetched.get(id).features.length) return prefetched.get(id);
+  const known = cachedPreview(id);
+  if (known) return known;
   const b = bbox.map((v) => v.toFixed(3)).join(',');
   const key = id + '|' + b;
   if (!prevCache.has(key)) {
